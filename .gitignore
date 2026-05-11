@@ -89,4 +89,4 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Built files
-backend/static/
+# backend/static/
