@@ -55,54 +55,57 @@ freight-comparison-agent/
 
 ## 快速开始
 
-### 1. 环境要求
+### 环境要求
 
 - Python 3.9 及以上版本
 - Node.js 18 及以上版本
-- npm 或 pnpm
 
-### 2. 安装后端依赖
+### 一键启动（推荐）
 
-```bash
-pip install -r requirements.txt
-```
+**Windows 用户：**
 
-### 3. 安装前端依赖
+双击运行 `start.bat`，脚本会自动安装依赖并启动服务。
 
-```bash
-cd frontend
-npm install
-```
-
-### 4. 启动服务
-
-**方式一：一键启动（推荐）**
+**或使用命令行：**
 
 ```bash
+# 克隆项目
+git clone https://github.com/JiangLin1297/Freight-Comparison-and-Optimization-Agent.git
+cd Freight-Comparison-and-Optimization-Agent
+
+# 一键启动（自动安装依赖）
 python run.py
-```
-
-**方式二：分别启动**
-
-启动后端：
-```bash
-cd backend
-python main.py
-```
-
-启动前端（新终端）：
-```bash
-cd frontend
-npm run dev
 ```
 
 服务启动后，访问以下地址：
 
-- 前端开发界面：http://localhost:3000
-- 后端 API：http://localhost:8000
-- API 交互文档（Swagger UI）：http://localhost:8000/docs
+- **前端界面**：http://localhost:3000
+- **后端 API**：http://localhost:8000
+- **API 文档**：http://localhost:8000/docs
 
-### 5. 构建生产版本
+### 手动启动
+
+如果一键启动遇到问题，可以手动操作：
+
+```bash
+# 1. 安装后端依赖
+pip install -r requirements.txt
+
+# 2. 安装前端依赖
+cd frontend
+npm install
+cd ..
+
+# 3. 启动后端（终端1）
+cd backend
+python main.py
+
+# 4. 启动前端（终端2）
+cd frontend
+npm run dev
+```
+
+### 构建生产版本
 
 ```bash
 cd frontend
