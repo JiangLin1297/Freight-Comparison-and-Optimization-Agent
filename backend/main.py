@@ -27,17 +27,26 @@ DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates.
 freight_service = FreightService(DATA_PATH)
 
 # 挂载前端静态文件
+STATIC_PATH = os.path.join(os.path.dirname(__file__), "static")
 FRONTEND_PATH = os.path.join(os.path.dirname(__file__), "..", "frontend")
-if os.path.exists(FRONTEND_PATH):
-    app.mount("/static", StaticFiles(directory=FRONTEND_PATH), name="static")
+
+# 优先使用构建后的静态文件，否则使用前端源码目录
+if os.path.exists(STATIC_PATH):
+    app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_PATH, "assets")), name="assets")
+    SERVE_PATH = STATIC_PATH
+elif os.path.exists(FRONTEND_PATH):
+    SERVE_PATH = FRONTEND_PATH
+else:
+    SERVE_PATH = None
 
 
 @app.get("/")
 async def root():
     """返回前端页面"""
-    index_path = os.path.join(FRONTEND_PATH, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
+    if SERVE_PATH:
+        index_path = os.path.join(SERVE_PATH, "index.html")
+        if os.path.exists(index_path):
+            return FileResponse(index_path)
     return {"message": "运输方案比价与优化智能体 API"}
 
 

@@ -32,7 +32,19 @@ freight-comparison-agent/
 │   ├── freight_service.py   # 核心业务逻辑（方案筛选、成本计算、推荐）
 │   └── requirements.txt     # Python 依赖声明
 ├── frontend/
-│   └── index.html           # 前端单页面应用
+│   ├── src/
+│   │   ├── main.js          # Vue 应用入口
+│   │   ├── App.vue          # 根组件
+│   │   └── components/      # Vue 组件
+│   │       ├── AppHeader.vue
+│   │       ├── StatisticsCard.vue
+│   │       ├── CompareForm.vue
+│   │       ├── ResultTable.vue
+│   │       ├── RecommendCard.vue
+│   │       └── ExportCard.vue
+│   ├── index.html           # HTML 入口
+│   ├── package.json         # 前端依赖配置
+│   └── vite.config.js       # Vite 构建配置
 ├── data/
 │   └── FreightRates.csv     # 承运商费率数据
 ├── run.py                   # 一键启动脚本
@@ -46,24 +58,58 @@ freight-comparison-agent/
 ### 1. 环境要求
 
 - Python 3.9 及以上版本
-- pip（Python 包管理工具）
+- Node.js 18 及以上版本
+- npm 或 pnpm
 
-### 2. 安装依赖
+### 2. 安装后端依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 启动服务
+### 3. 安装前端依赖
+
+```bash
+cd frontend
+npm install
+```
+
+### 4. 启动服务
+
+**方式一：一键启动（推荐）**
 
 ```bash
 python run.py
 ```
 
+**方式二：分别启动**
+
+启动后端：
+```bash
+cd backend
+python main.py
+```
+
+启动前端（新终端）：
+```bash
+cd frontend
+npm run dev
+```
+
 服务启动后，访问以下地址：
 
-- 应用界面：http://localhost:8000
+- 前端开发界面：http://localhost:3000
+- 后端 API：http://localhost:8000
 - API 交互文档（Swagger UI）：http://localhost:8000/docs
+
+### 5. 构建生产版本
+
+```bash
+cd frontend
+npm run build
+```
+
+构建后的文件将输出到 `backend/static/`，后端会自动提供静态文件服务。
 
 ## 数据说明
 
