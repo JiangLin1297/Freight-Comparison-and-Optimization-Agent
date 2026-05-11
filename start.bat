@@ -1,46 +1,46 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo 运输方案比价与优化智能体 - 启动脚本
+echo Freight Comparison Agent - Start Script
 echo ========================================
 echo.
 
-:: 检查Python
+:: Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到Python，请先安装Python 3.9+
+    echo [ERROR] Python not found. Please install Python 3.9+
     pause
     exit /b 1
 )
 
-:: 检查Node.js
+:: Check Node.js
 node --version >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到Node.js，请先安装Node.js 18+
+    echo [ERROR] Node.js not found. Please install Node.js 18+
     pause
     exit /b 1
 )
 
-:: 安装后端依赖
-echo [1/3] 安装后端依赖...
+:: Install backend dependencies
+echo [1/3] Installing backend dependencies...
 pip install -r requirements.txt -q
 
-:: 安装前端依赖
-echo [2/3] 安装前端依赖...
+:: Install frontend dependencies
+echo [2/3] Installing frontend dependencies...
 cd frontend
 call npm install
 cd ..
 
-:: 启动服务
-echo [3/3] 启动服务...
+:: Start service
+echo [3/3] Starting service...
 echo.
 echo ========================================
-echo 前端界面: http://localhost:3000
-echo 后端API: http://localhost:8000
-echo API文档: http://localhost:8000/docs
+echo Frontend: http://localhost:3000
+echo Backend: http://localhost:8000
+echo API Docs: http://localhost:8000/docs
 echo ========================================
 echo.
-echo 按 Ctrl+C 停止服务
+echo Press Ctrl+C to stop
 echo.
 
 python run.py
