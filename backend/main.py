@@ -2,10 +2,29 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import os
 
+# 手动加载 .env 文件
+env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+if os.path.exists(env_path):
+    with open(env_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ[key.strip()] = value.strip()
+
 from models import OrderRequest, ComparisonResult
-from freight_service import FreightService
+from freight_service import FreightService, CSVDataStore
+
+# LLM服务可选导入
+try:
+    from llm_service import LLMService
+    llm_service = LLMService()
+except Exception as e:
+    print(f"LLM服务初始化失败: {e}")
+    llm_service = None
 
 app = FastAPI(
     title="运输方案比价与优化智能体",
@@ -22,15 +41,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 初始化服务
+# 使用CSV数据源
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates.csv")
-freight_service = FreightService(DATA_PATH)
+data_store = CSVDataStore(DATA_PATH)
+print(f"使用 CSV 数据源: {DATA_PATH}")
+
+freight_service = FreightService(data_store)
+
+
+class ChatRequest(BaseModel):
+    message: str
+    system_prompt: str = None
+
+
+class ParseRequest(BaseModel):
+    text: str
+
 
 # 挂载前端静态文件
 STATIC_PATH = os.path.join(os.path.dirname(__file__), "static")
 FRONTEND_PATH = os.path.join(os.path.dirname(__file__), "..", "frontend")
 
-# 优先使用构建后的静态文件，否则使用前端源码目录
 if os.path.exists(STATIC_PATH):
     app.mount("/assets", StaticFiles(directory=os.path.join(STATIC_PATH, "assets")), name="assets")
     SERVE_PATH = STATIC_PATH
@@ -59,24 +90,40 @@ async def get_ports():
 @app.get("/api/statistics")
 async def get_statistics():
     """获取数据统计信息"""
-    return freight_service.get_statistics()
+    stats = freight_service.get_statistics()
+    stats["data_source"] = "csv"
+    return stats
 
 
 @app.post("/api/compare", response_model=ComparisonResult)
 async def compare_freight(order: OrderRequest):
-    """
-    执行运费比价
-
-    - **weight**: 货物总重量(kg)
-    - **orig_port**: 起运港代码
-    - **dest_port**: 目的港代码
-    - **max_days**: 最大运输天数(可选)
-    """
+    """执行运费比价"""
     try:
         result = freight_service.compare(order)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/chat")
+async def chat(request: ChatRequest):
+    """调用 LLM 进行对话"""
+    if llm_service is None:
+        return {"response": "LLM服务未配置", "model": "none", "configured": False}
+    response = llm_service.chat(request.message, request.system_prompt)
+    return {"response": response, "model": llm_service.model, "configured": llm_service.is_configured()}
+
+
+@app.post("/api/parse")
+async def parse_order(request: ParseRequest):
+    """将自然语言描述解析为结构化订单数据"""
+    if llm_service is None:
+        return {"error": "LLM服务未配置", "data": None}
+    try:
+        result = llm_service.parse_order(request.text)
+        return {"error": None, "data": result}
+    except Exception as e:
+        return {"error": str(e), "data": None}
 
 
 @app.post("/api/export")
@@ -88,6 +135,16 @@ async def export_report(order: OrderRequest):
         return {"report": report}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/status")
+async def get_status():
+    """获取系统状态"""
+    return {
+        "data_source": "csv",
+        "llm_configured": llm_service.is_configured() if llm_service else False,
+        "llm_model": llm_service.model if llm_service else "none",
+    }
 
 
 def generate_report(result: ComparisonResult) -> str:
