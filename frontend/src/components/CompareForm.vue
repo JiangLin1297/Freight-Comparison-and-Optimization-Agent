@@ -41,7 +41,7 @@
           :model-value="form.max_days"
           @update:model-value="updateField('max_days', $event)"
           :min="0"
-          :max="30"
+          :max="365"
           placeholder="不限"
           style="width: 100%"
         />

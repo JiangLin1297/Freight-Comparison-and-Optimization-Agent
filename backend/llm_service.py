@@ -150,7 +150,18 @@ class LLMService:
 3. 港口代码必须大写
 4. 如果用户使用中文港口名，必须转换为对应的PORT代码
 5. 如果信息缺失，对应字段设为null
-6. 如果用户只提到一个港口名且上下文是"从...发/运"，则为起运港；目的港默认PORT09"""
+6. 如果用户只提到一个港口名且上下文是"从...发/运"，则为起运港；目的港默认PORT09
+7. 最大天数(max_days)识别规则：
+   - 识别"3天"、"5天"、"7天"等基本格式
+   - 识别"最大3天"、"最多5天"、"不超过7天"等带修饰词的格式
+   - 识别"3天内"、"5天以内"、"3天内到达"等带后缀的格式
+   - 识别"3个工作日"、"5个工作日"等格式
+   - 识别"1周"、"2周"、"3周"等周格式（自动转换为天数，1周=7天）
+   - 识别"1周内"、"最大2周"等带修饰词的周格式
+   - 识别"半个月"、"一个月"等中文数字月格式（自动转换为天数，1个月=30天）
+   - 识别"最大半个月"、"最多一个月"等带修饰词的中文数字月格式
+   - 识别模糊时间表达："尽快"、"加急"、"紧急"、"特急"默认3天；"普通"、"常规"、"一般"默认14天
+   - 如果用户没有明确提到时间要求，设为null"""
 
         try:
             response = self.client.chat.completions.create(
@@ -232,10 +243,47 @@ class LLMService:
         if result["orig_port"] and not result["dest_port"]:
             result["dest_port"] = "PORT09"
 
-        # 提取天数
-        days_match = re.search(r'(\d+)\s*(?:天|日|days?)', text, re.IGNORECASE)
-        if days_match:
-            result["max_days"] = int(days_match.group(1))
+        # 提取天数（支持多种表达方式）
+        days_patterns = [
+            r'(\d+)\s*(?:天|日|days?|工作日|个工作日)',  # 基本格式：3天、5日、7days、3工作日
+            r'(?:最大|最多|不超过|限|要求|需要|希望)\s*(\d+)\s*(?:天|日|days?|工作日|个工作日)',  # 带修饰词：最大3天、最多5天
+            r'(\d+)\s*(?:天|日|days?|工作日|个工作日)\s*(?:内|以内|之内|到达|送达)',  # 带后缀：3天内、5天以内
+            r'(\d+)\s*(?:周|星期|weeks?)',  # 周格式：1周、2星期、3weeks
+            r'(?:最大|最多|不超过|限|要求|需要|希望)\s*(\d+)\s*(?:周|星期|weeks?)',  # 带修饰词的周格式
+            r'(\d+)\s*(?:周|星期|weeks?)\s*(?:内|以内|之内)',  # 带后缀的周格式
+            r'(半|一|二|三|四|五|六|七|八|九|十)\s*(?:个月|月)',  # 中文数字月格式：半个月、一个月
+            r'(?:最大|最多|不超过|限|要求|需要|希望)\s*(半|一|二|三|四|五|六|七|八|九|十)\s*(?:个月|月)',  # 带修饰词的中文数字月格式
+        ]
+        # 中文数字映射
+        cn_num_map = {'半': 0.5, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
+        for pattern in days_patterns:
+            days_match = re.search(pattern, text, re.IGNORECASE)
+            if days_match:
+                days_str = days_match.group(1)
+                # 处理中文数字
+                if days_str in cn_num_map:
+                    days = cn_num_map[days_str]
+                else:
+                    days = int(days_str)
+                # 如果是周格式，转换为天数
+                if '周' in pattern or '星期' in pattern or 'weeks?' in pattern:
+                    days = days * 7
+                # 如果是月格式，转换为天数（按30天计算）
+                elif '个月' in pattern or '月' in pattern:
+                    days = days * 30
+                result["max_days"] = int(days)
+                break
+
+        # 如果没有匹配到具体天数，检查是否有模糊时间表达
+        if result["max_days"] is None:
+            fuzzy_patterns = [
+                (r'尽快|加急|紧急|特急', 3),  # 尽快、加急等默认3天
+                (r'普通|常规|一般', 14),  # 普通、常规等默认14天
+            ]
+            for pattern, default_days in fuzzy_patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    result["max_days"] = default_days
+                    break
 
         return result
 

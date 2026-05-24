@@ -8,7 +8,7 @@ class OrderRequest(BaseModel):
     weight: float = Field(..., gt=0, description="货物总重量(kg)")
     orig_port: str = Field(..., description="起运港代码")
     dest_port: str = Field(..., description="目的港代码")
-    max_days: Optional[int] = Field(None, ge=0, description="最大运输天数(可选)")
+    max_days: Optional[int] = Field(None, ge=0, le=365, description="最大运输天数(可选，范围0-365)")
 
 
 class CarrierPlan(BaseModel):

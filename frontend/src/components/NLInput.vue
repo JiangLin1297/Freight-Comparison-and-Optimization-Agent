@@ -8,7 +8,7 @@
         v-model="inputText"
         type="textarea"
         :rows="3"
-        placeholder="例如：从上海运输100公斤货物到深圳，希望5天内到达（支持中文港口名或PORT代码）"
+        placeholder="例如：从上海运输100公斤货物到深圳，希望5天内到达（支持中文港口名或PORT代码，支持天/周/月/工作日等时间格式）"
         :disabled="parsing"
       />
       <el-button
@@ -19,6 +19,20 @@
       >
         {{ parsing ? '解析中...' : '智能解析' }}
       </el-button>
+    </div>
+
+    <!-- 帮助提示 -->
+    <div class="help-tips">
+      <p><strong>支持的时间格式：</strong></p>
+      <ul>
+        <li>基本格式：3天、5日、7天</li>
+        <li>带修饰词：最大3天、最多5天、不超过7天</li>
+        <li>带后缀：3天内、5天以内、3天内到达</li>
+        <li>工作日：3个工作日、5个工作日</li>
+        <li>周格式：1周、2周（自动转换为7天、14天）</li>
+        <li>中文数字月：半个月、一个月（自动转换为15天、30天）</li>
+        <li>模糊表达：尽快、加急（默认3天）；普通、常规（默认14天）</li>
+      </ul>
     </div>
 
     <!-- 解析结果预览 -->
@@ -129,6 +143,31 @@ const handleConfirm = () => {
 .parse-btn {
   height: auto;
   padding: 12px 24px;
+}
+
+.help-tips {
+  margin-top: 10px;
+  padding: 10px 15px;
+  background: #f5f7fa;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #606266;
+}
+
+.help-tips p {
+  margin: 0 0 8px 0;
+  font-weight: bold;
+  color: #409eff;
+}
+
+.help-tips ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.help-tips li {
+  margin-bottom: 4px;
+  line-height: 1.4;
 }
 
 .parsed-preview {
