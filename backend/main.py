@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from typing import Optional, List
 import os
 
 # 手动加载 .env 文件
@@ -18,10 +19,19 @@ if os.path.exists(env_path):
 from models import OrderRequest, ComparisonResult
 from freight_service import FreightService, CSVDataStore
 
+# 工具管理器导入
+try:
+    from tools import setup_tools, ToolManager
+    tool_manager = setup_tools()
+    print(f"工具管理器初始化成功，已注册 {len(tool_manager.tools)} 个工具")
+except Exception as e:
+    print(f"工具管理器初始化失败: {e}")
+    tool_manager = None
+
 # LLM服务可选导入
 try:
     from llm_service import LLMService
-    llm_service = LLMService()
+    llm_service = LLMService(tool_manager=tool_manager)
 except Exception as e:
     print(f"LLM服务初始化失败: {e}")
     llm_service = None
@@ -41,10 +51,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 使用CSV数据源
-DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates.csv")
-data_store = CSVDataStore(DATA_PATH)
-print(f"使用 CSV 数据源: {DATA_PATH}")
+# 使用CSV数据源（优先使用带评级的数据文件）
+DATA_PATH_WITH_RATING = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates_with_rating.csv")
+DATA_PATH_ORIGINAL = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates.csv")
+DATA_PATH_EXTENDED = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates_extended.csv")
+DATA_PATH_COMBINED = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates_combined.csv")
+
+# 优先使用合并数据（包含扩展数据）
+if os.path.exists(DATA_PATH_COMBINED):
+    DATA_PATH = DATA_PATH_COMBINED
+    print(f"使用合并 CSV 数据源: {DATA_PATH}")
+elif os.path.exists(DATA_PATH_WITH_RATING):
+    DATA_PATH = DATA_PATH_WITH_RATING
+    print(f"使用带评级的 CSV 数据源: {DATA_PATH}")
+else:
+    DATA_PATH = DATA_PATH_ORIGINAL
+    print(f"使用原始 CSV 数据源: {DATA_PATH}")
+
+# 加载数据（如果存在扩展数据，会自动合并）
+data_store = CSVDataStore(DATA_PATH, DATA_PATH_EXTENDED if DATA_PATH != DATA_PATH_EXTENDED else None)
 
 freight_service = FreightService(data_store)
 
@@ -56,6 +81,12 @@ class ChatRequest(BaseModel):
 
 class ParseRequest(BaseModel):
     text: str
+    session_id: Optional[str] = None
+
+
+class ContinueRequest(BaseModel):
+    session_id: str
+    message: str
 
 
 # 挂载前端静态文件
@@ -114,13 +145,109 @@ async def chat(request: ChatRequest):
     return {"response": response, "model": llm_service.model, "configured": llm_service.is_configured()}
 
 
+@app.post("/api/agentic_chat")
+async def agentic_chat(request: ChatRequest):
+    """
+    Agentic对话接口 - 支持工具调用
+    LLM会根据用户输入自动选择和调用合适的工具
+    """
+    if llm_service is None:
+        return {"response": "LLM服务未配置", "tool_calls": [], "configured": False}
+
+    try:
+        # 获取LLM响应和工具调用
+        llm_result = llm_service.chat_with_tools(request.message)
+        tool_calls = llm_result.get("tool_calls", [])
+
+        # 执行工具调用
+        tool_results = []
+        if tool_calls and tool_manager:
+            for tool_call in tool_calls:
+                tool_name = tool_call.get("tool")
+                parameters = tool_call.get("parameters", {})
+
+                try:
+                    tool_result = await tool_manager.execute_tool(tool_name, parameters)
+                    tool_results.append(tool_result)
+                except Exception as e:
+                    tool_results.append({
+                        "success": False,
+                        "tool": tool_name,
+                        "error": str(e)
+                    })
+
+        return {
+            "response": llm_result.get("response", ""),
+            "tool_calls": tool_calls,
+            "tool_results": tool_results,
+            "model": llm_service.model if llm_service else "none",
+            "configured": llm_result.get("configured", False),
+            "session_id": llm_result.get("session_id")
+        }
+
+    except Exception as e:
+        return {
+            "response": f"处理失败: {str(e)}",
+            "tool_calls": [],
+            "tool_results": [],
+            "error": str(e)
+        }
+
+
+@app.get("/api/tools")
+async def get_tools():
+    """获取所有可用工具列表"""
+    if tool_manager is None:
+        return {"tools": [], "count": 0}
+    return {
+        "tools": tool_manager.get_tools_schema(),
+        "count": len(tool_manager.tools)
+    }
+
+
+@app.post("/api/execute_tool")
+async def execute_tool(tool_name: str, parameters: dict = {}):
+    """直接执行指定工具"""
+    if tool_manager is None:
+        raise HTTPException(status_code=500, detail="工具管理器未初始化")
+    try:
+        result = await tool_manager.execute_tool(tool_name, parameters)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/parse")
 async def parse_order(request: ParseRequest):
-    """将自然语言描述解析为结构化订单数据"""
+    """将自然语言描述解析为结构化订单数据，支持CoT思维链"""
     if llm_service is None:
         return {"error": "LLM服务未配置", "data": None}
     try:
-        result = llm_service.parse_order(request.text)
+        result = llm_service.parse_order(request.text, request.session_id)
+        return {"error": None, "data": result}
+    except Exception as e:
+        return {"error": str(e), "data": None}
+
+
+@app.post("/api/continue")
+async def continue_conversation(request: ContinueRequest):
+    """继续多轮对话，补充缺失信息"""
+    if llm_service is None:
+        return {"error": "LLM服务未配置", "data": None}
+    try:
+        result = llm_service.continue_conversation(request.session_id, request.message)
+        return {"error": None, "data": result}
+    except Exception as e:
+        return {"error": str(e), "data": None}
+
+
+@app.get("/api/session/{session_id}")
+async def get_session_status(session_id: str):
+    """获取会话状态"""
+    if llm_service is None:
+        return {"error": "LLM服务未配置", "data": None}
+    try:
+        result = llm_service.get_session_status(session_id)
         return {"error": None, "data": result}
     except Exception as e:
         return {"error": str(e), "data": None}

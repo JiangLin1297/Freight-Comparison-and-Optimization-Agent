@@ -47,7 +47,8 @@ const form = ref({
   weight: 100,
   orig_port: 'PORT08',
   dest_port: 'PORT09',
-  max_days: null
+  max_days: null,
+  priority: null
 })
 
 const ports = ref({ orig_ports: [], dest_ports: [] })
@@ -77,7 +78,22 @@ const handleNLParsed = (data) => {
   if (data.orig_port) form.value.orig_port = data.orig_port
   if (data.dest_port) form.value.dest_port = data.dest_port
   if (data.max_days) form.value.max_days = data.max_days
+  if (data.priority) form.value.priority = data.priority
   flowStep.value = 1
+
+  // 显示优先级提示
+  if (data.priority === 'time') {
+    ElMessage.info('已识别为时效优先模式，将优先推荐最快的方案')
+  } else if (data.priority === 'cost') {
+    ElMessage.info('已识别为成本优先模式，将优先推荐最便宜的方案')
+  }
+
+  // 如果信息完整，自动触发推荐
+  if (data.weight && data.orig_port && data.dest_port) {
+    setTimeout(() => {
+      handleCompare()
+    }, 500) // 延迟500ms，让用户看到优先级提示
+  }
 }
 
 const handleCompare = async () => {
@@ -92,17 +108,23 @@ const handleCompare = async () => {
   flowStep.value = 2
 
   try {
-    const res = await axios.post('/api/compare', {
+    const requestData = {
       weight: form.value.weight,
       orig_port: form.value.orig_port,
       dest_port: form.value.dest_port,
-      max_days: form.value.max_days || null
-    })
+      max_days: form.value.max_days || null,
+      priority: form.value.priority || null
+    }
+    const res = await axios.post('/api/compare', requestData)
     result.value = res.data
     flowStep.value = 4
-    ElMessage.success(`找到 ${res.data.total_plans_found} 个可用方案`)
+
+    // 显示推荐模式提示
+    const priorityText = form.value.priority === 'time' ? '（时效优先）' :
+                        form.value.priority === 'cost' ? '（成本优先）' : '（均衡模式）'
+    ElMessage.success(`已为您推荐最优方案${priorityText}`)
   } catch (e) {
-    ElMessage.error('比价失败: ' + (e.response?.data?.detail || e.message))
+    ElMessage.error('推荐失败: ' + (e.response?.data?.detail || e.message))
     flowStep.value = 2
   } finally {
     loading.value = false
@@ -116,7 +138,8 @@ const handleExport = async () => {
       weight: form.value.weight,
       orig_port: form.value.orig_port,
       dest_port: form.value.dest_port,
-      max_days: form.value.max_days || null
+      max_days: form.value.max_days || null,
+      priority: form.value.priority || null
     })
     report.value = res.data.report
     ElMessage.success('报告生成成功')
