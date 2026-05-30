@@ -197,14 +197,22 @@ class FreightService:
                 # 均衡模式：综合考虑成本、时效、服务
                 weights = ScoringWeights(cost_weight=0.4, time_weight=0.3, service_weight=0.3)
 
-        # 计算每个方案的评分
+        # 计算每个方案的评分（作为参考指标）
         for plan in filtered_plans:
             score, details = self.calculate_score(plan, filtered_plans, weights)
             plan.score = score
             plan.score_details = details
 
-        # 按评分降序排序（分数越高越好）
-        sorted_plans = sorted(filtered_plans, key=lambda x: x.score if x.score else 0, reverse=True)
+        # 根据优先级选择排序方式
+        if priority == "cost":
+            # 成本优先：按成本升序排序（越低越好）
+            sorted_plans = sorted(filtered_plans, key=lambda x: x.total_cost)
+        elif priority == "time":
+            # 时效优先：按天数升序排序（越快越好）
+            sorted_plans = sorted(filtered_plans, key=lambda x: x.transport_days)
+        else:
+            # 均衡模式：按综合评分降序排序（分数越高越好）
+            sorted_plans = sorted(filtered_plans, key=lambda x: x.score if x.score else 0, reverse=True)
         best_plan = sorted_plans[0]
 
         # 生成推荐理由

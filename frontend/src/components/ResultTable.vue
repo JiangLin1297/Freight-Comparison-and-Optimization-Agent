@@ -4,11 +4,9 @@
     <p style="color: #909399; margin-bottom: 15px;">
       共找到 <strong style="color: #667eea">{{ result.total_plans_found }}</strong> 个可用方案
       <span v-if="result.filtered_by_time">（已按时效要求过滤）</span>
-      <span v-if="result.scoring_weights" class="weights-info">
-        | 评分权重：成本{{ (result.scoring_weights.cost_weight * 100).toFixed(0) }}%
-        时效{{ (result.scoring_weights.time_weight * 100).toFixed(0) }}%
-        服务{{ (result.scoring_weights.service_weight * 100).toFixed(0) }}%
-      </span>
+      <el-tag v-if="sortBasis" :type="sortBasis.type" size="small" style="margin-left: 10px;">
+        {{ sortBasis.text }}
+      </el-tag>
     </p>
 
     <table class="result-table" v-if="result.available_plans.length > 0">
@@ -93,13 +91,35 @@ const props = defineProps({
   result: { type: Object, required: true }
 })
 
+const sortBasis = computed(() => {
+  const priority = props.result.order_info?.priority
+  if (priority === 'cost') {
+    return { text: '按成本排序', type: 'success' }
+  } else if (priority === 'time') {
+    return { text: '按时效排序', type: 'danger' }
+  } else {
+    return { text: '按综合评分排序', type: 'primary' }
+  }
+})
+
 const sortedPlans = computed(() => {
   if (!props.result.available_plans) return []
-  // 按评分降序排序（确保所有方案都有评分）
+
+  const priority = props.result.order_info?.priority
+
   return [...props.result.available_plans].sort((a, b) => {
-    const scoreA = typeof a.score === 'number' ? a.score : 0
-    const scoreB = typeof b.score === 'number' ? b.score : 0
-    return scoreB - scoreA
+    if (priority === 'cost') {
+      // 成本优先：按成本升序排序（越低越好）
+      return a.total_cost - b.total_cost
+    } else if (priority === 'time') {
+      // 时效优先：按天数升序排序（越快越好）
+      return a.transport_days - b.transport_days
+    } else {
+      // 均衡模式：按综合评分降序排序（分数越高越好）
+      const scoreA = typeof a.score === 'number' ? a.score : 0
+      const scoreB = typeof b.score === 'number' ? b.score : 0
+      return scoreB - scoreA
+    }
   })
 })
 
