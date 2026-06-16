@@ -92,6 +92,63 @@
       <p v-else-if="isOverweight">重量超标，建议考虑分批运输</p>
       <p v-else>未找到匹配的运输方案</p>
     </div>
+
+    <!-- 转运路线 -->
+    <div v-if="result.transfer_routes && result.transfer_routes.length > 0" class="transfer-section">
+      <div class="transfer-header">
+        <el-tag type="warning" size="small" effect="dark">转运方案</el-tag>
+        <span class="transfer-hint">未找到直达路线，以下为经中转港的转运方案</span>
+      </div>
+      <div v-for="(tr, i) in result.transfer_routes" :key="'tr-' + i" class="transfer-card">
+        <div class="transfer-path">
+          <span v-for="(p, j) in tr.path" :key="j">
+            <el-tag size="small" :type="j === 0 ? '' : j === tr.path.length - 1 ? 'success' : 'warning'">
+              {{ p }}
+            </el-tag>
+            <span v-if="j < tr.path.length - 1" class="path-arrow">→</span>
+          </span>
+          <span class="transfer-badge">经{{ tr.hop_count }}次转运</span>
+        </div>
+        <div class="transfer-meta">
+          <span>总成本 <strong>${{ tr.total_cost.toFixed(2) }}</strong></span>
+          <span>总耗时 <strong>{{ tr.total_estimated_days }}天</strong> (运输{{ tr.total_days }}天 + 转运{{ tr.hop_count }}天)</span>
+          <span v-if="typeof tr.score === 'number'">评分 <el-tag :type="tr.score >= 0.8 ? 'success' : tr.score >= 0.6 ? 'warning' : 'danger'" size="small">{{ tr.score.toFixed(3) }}</el-tag></span>
+        </div>
+        <div class="transfer-legs">
+          <div v-for="(leg, k) in tr.legs" :key="'leg-' + k" class="leg-row">
+            <span class="leg-label">第{{ k + 1 }}段</span>
+            <span>{{ leg.from_port }} → {{ leg.to_port }}</span>
+            <el-tag :type="leg.mode === 'AIR' ? 'primary' : 'success'" size="small" effect="plain">
+              {{ leg.mode === 'AIR' ? '空运' : '陆运' }}
+            </el-tag>
+            <span>{{ leg.service_level === 'DTD' ? '门到门' : '门到港' }}</span>
+            <span>{{ leg.carrier }}</span>
+            <span class="leg-cost">${{ leg.total_cost.toFixed(2) }}</span>
+            <span>{{ leg.transport_days }}天</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 次优推荐 (fallback) -->
+    <div v-if="result.fallback_transfer && (!result.transfer_routes || result.transfer_routes.length === 0)" class="fallback-section">
+      <div class="transfer-header">
+        <el-tag type="danger" size="small" effect="dark">次优推荐</el-tag>
+        <span class="transfer-hint">{{ result.fallback_reason || '当前条件下无可用方案，以下为最接近的选项' }}</span>
+      </div>
+      <div class="transfer-card fallback-card">
+        <div class="transfer-path">
+          <span v-for="(p, j) in result.fallback_transfer.path" :key="j">
+            <el-tag size="small">{{ p }}</el-tag>
+            <span v-if="j < result.fallback_transfer.path.length - 1" class="path-arrow">→</span>
+          </span>
+        </div>
+        <div class="transfer-meta">
+          <span>总成本 <strong>${{ result.fallback_transfer.total_cost.toFixed(2) }}</strong></span>
+          <span>总耗时 <strong>{{ result.fallback_transfer.total_estimated_days }}天</strong></span>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -266,4 +323,21 @@ const getScoreType = (score) => {
   margin: 5px 0;
   font-size: 14px;
 }
+
+.transfer-section { margin-top: 20px; border-top: 2px solid #f59e0b; padding-top: 14px; }
+.transfer-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.transfer-hint { color: #64748b; font-size: 13px; }
+.transfer-card { background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+.transfer-path { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+.path-arrow { color: #94a3b8; font-weight: 700; margin: 0 2px; }
+.transfer-badge { color: #92400e; font-size: 12px; margin-left: 8px; }
+.transfer-meta { display: flex; gap: 16px; flex-wrap: wrap; color: #64748b; font-size: 13px; margin-bottom: 10px; }
+.transfer-meta strong { color: #0f766e; }
+.transfer-legs { border-top: 1px dashed #fcd34d; padding-top: 8px; }
+.leg-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 13px; color: #475569; }
+.leg-label { background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.leg-cost { color: #0f766e; font-weight: 700; }
+
+.fallback-section { margin-top: 20px; border-top: 2px solid #ef4444; padding-top: 14px; }
+.fallback-card { background: #fef2f2; border-color: #fca5a5; }
 </style>

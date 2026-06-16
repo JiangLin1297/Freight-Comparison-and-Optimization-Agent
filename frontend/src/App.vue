@@ -78,7 +78,7 @@
 
         <FlowVisualization :step="flowStep" :result="result" :loading="loading" />
 
-        <ResultTable v-if="result && result.recommended_plan" :result="result" />
+        <ResultTable v-if="result && (result.recommended_plan || result.transfer_routes || result.fallback_transfer)" :result="result" />
 
         <ExportCard
           v-if="result"
@@ -358,10 +358,21 @@ const handleCompare = async () => {
     flowStep.value = 4
 
     const isOverweight = result.value.available_plans?.some(plan => !plan.is_exact_match)
-    const hasNoRecommendation = !result.value.recommended_plan
+    const hasRecommendation = !!result.value.recommended_plan
+    const hasTransfer = result.value.transfer_routes?.length > 0
+    const hasFallback = !!result.value.fallback_transfer
 
-    if (hasNoRecommendation && isOverweight) {
-      ElMessage.warning('重量过重，未找到可用方案')
+    if (!hasRecommendation && !hasTransfer && !hasFallback) {
+      if (isOverweight) {
+        ElMessage.warning('重量过重，未找到可用方案')
+      } else {
+        ElMessage.warning('未找到匹配的运输方案')
+      }
+    } else if (hasTransfer && !hasRecommendation) {
+      const n = result.value.transfer_routes.length
+      ElMessage.success(`未找到直达方案，已为您找到 ${n} 条转运路线`)
+    } else if (hasFallback && !hasRecommendation && !hasTransfer) {
+      ElMessage.warning(result.value.fallback_reason || '当前条件下无可用方案')
     } else if (isOverweight) {
       ElMessage.warning('重量超标，建议考虑分批运输')
     } else {
