@@ -1,43 +1,37 @@
-"""运费比价服务 - 使用CSV数据源，支持多维度评分和转运路径搜索"""
+"""运费比价服务 - 支持 CSV 和 SQLite 双数据源，多维度评分和转运路径搜索"""
 import os
+import time
+import logging
 import pandas as pd
 from typing import List, Optional, Dict, Any
 from models import (OrderRequest, CarrierPlan, ComparisonResult, Recommendation,
                     ScoringWeights, TransferPlan, LegPlan)
 from graph_router import GraphRouter, RoutingResult, TransferRoute
+from base_data_store import BaseDataStore
+from common.data_cleaner import clean_dataframe
+
+logger = logging.getLogger(__name__)
 
 
-class CSVDataStore:
-    """CSV文件数据源 - 支持多数据源合并"""
+# ======================================================================
+# CSVDataStore (legacy, @deprecated)
+# ======================================================================
+
+class CSVDataStore(BaseDataStore):
+    """@deprecated: CSV文件数据源 - 保留作为降级备用"""
 
     def __init__(self, csv_path: str, extended_csv_path: str = None):
         self.df = pd.read_csv(csv_path)
         self.df.columns = self.df.columns.str.strip()
 
-        # 加载扩展数据
         if extended_csv_path and os.path.exists(extended_csv_path):
             extended_df = pd.read_csv(extended_csv_path)
             extended_df.columns = extended_df.columns.str.strip()
             self.df = pd.concat([self.df, extended_df], ignore_index=True)
-            # 去重
             self.df = self.df.drop_duplicates()
             print(f"已加载扩展数据，总记录数: {len(self.df)}")
 
-        self._clean_data()
-
-    def _clean_data(self):
-        """清洗数据"""
-        self.df['Mode_DSC'] = self.df['Mode_DSC'].str.strip()
-        self.df['Min_Weight_Quant'] = pd.to_numeric(self.df['Min_Weight_Quant'], errors='coerce')
-        self.df['Max_Weight_Quant'] = pd.to_numeric(self.df['Max_Weight_Quant'], errors='coerce')
-        self.df['Min_Cost'] = pd.to_numeric(self.df['Min_Cost'], errors='coerce')
-        self.df['Rate'] = pd.to_numeric(self.df['Rate'], errors='coerce')
-        self.df['TPT_Day_Count'] = pd.to_numeric(self.df['TPT_Day_Count'], errors='coerce')
-        # 处理 Service_Rating 字段（如果存在）
-        if 'Service_Rating' in self.df.columns:
-            self.df['Service_Rating'] = self.df['Service_Rating'].fillna('C').str.strip()
-        else:
-            self.df['Service_Rating'] = 'C'
+        self.df = clean_dataframe(self.df)
 
     def get_available_ports(self) -> dict:
         orig_ports = sorted(self.df['Orig_Port'].unique().tolist())
@@ -45,7 +39,6 @@ class CSVDataStore:
         return {"orig_ports": orig_ports, "dest_ports": dest_ports}
 
     def count_matching(self, weight: float, orig_port: str, dest_port: str) -> int:
-        """统计匹配的记录数"""
         mask = (
             (self.df['Orig_Port'] == orig_port) &
             (self.df['Dest_Port'] == dest_port) &
@@ -65,15 +58,11 @@ class CSVDataStore:
         }
 
     def match_plans(self, order: OrderRequest) -> List[Dict[str, Any]]:
-        """匹配承运商方案 - 支持重量超标检测"""
         df = self.df
-
-        # 检查路线是否存在
         route_exists = ((df['Orig_Port'] == order.orig_port) & (df['Dest_Port'] == order.dest_port)).any()
         if not route_exists:
             return []
 
-        # 精确匹配：重量在范围内
         exact_mask = (
             (df['Orig_Port'] == order.orig_port) &
             (df['Dest_Port'] == order.dest_port) &
@@ -82,7 +71,6 @@ class CSVDataStore:
         )
         exact_matched = df[exact_mask]
 
-        # 如果有精确匹配，返回精确匹配结果
         if not exact_matched.empty:
             results = []
             for _, row in exact_matched.iterrows():
@@ -103,23 +91,18 @@ class CSVDataStore:
                 })
             return results
 
-        # 重量超标：查找最接近目标重量的方案（Max_Weight_Quant 最大的方案）
         route_mask = (
             (df['Orig_Port'] == order.orig_port) &
             (df['Dest_Port'] == order.dest_port)
         )
         route_df = df[route_mask]
-
         if route_df.empty:
             return []
 
-        # 找到最大重量范围的方案
         max_weight = route_df['Max_Weight_Quant'].max()
         max_weight_plans = route_df[route_df['Max_Weight_Quant'] == max_weight]
 
-        # 如果有多个方案具有相同的最大重量范围，选择费率最低的方案
         if len(max_weight_plans) > 1:
-            # 按费率排序，选择费率最低的方案
             best_plan = max_weight_plans.loc[max_weight_plans['Rate'].idxmin()]
             results = [{
                 "carrier": best_plan['Carrier'],
@@ -134,10 +117,9 @@ class CSVDataStore:
                 "transport_days": int(best_plan['TPT_Day_Count']),
                 "carrier_type": best_plan['Carrier_Type'],
                 "service_rating": best_plan.get('Service_Rating', 'C'),
-                "is_exact_match": False  # 标记为非精确匹配（重量超标）
+                "is_exact_match": False
             }]
         else:
-            # 只有一个方案
             row = max_weight_plans.iloc[0]
             results = [{
                 "carrier": row['Carrier'],
@@ -152,29 +134,269 @@ class CSVDataStore:
                 "transport_days": int(row['TPT_Day_Count']),
                 "carrier_type": row['Carrier_Type'],
                 "service_rating": row.get('Service_Rating', 'C'),
-                "is_exact_match": False  # 标记为非精确匹配（重量超标）
+                "is_exact_match": False
             }]
         return results
 
 
+# ======================================================================
+# DBDataStore (SQLite)
+# ======================================================================
+
+class DBDataStore(BaseDataStore):
+    """SQLite 数据源 - 通过 SQLAlchemy 查询 freight_rates 表"""
+
+    def __init__(self, db_session_factory=None, auto_init: bool = True):
+        if db_session_factory is None:
+            from database import get_session_factory
+            db_session_factory = get_session_factory()
+        self._session_factory = db_session_factory
+
+        self._df = None  # 惰性加载的 DataFrame，供 GraphRouter 使用
+
+        if auto_init:
+            self._ensure_data()
+
+        # TTL 缓存
+        self._cache: Dict[str, tuple] = {}  # key -> (value, expire_time)
+        self._cache_ttl = 300  # 5 分钟
+
+    def _ensure_data(self):
+        """确保数据库有数据，否则从 CSV 导入"""
+        from sqlalchemy import func
+        from db_models import FreightRate
+        session = self._session_factory()
+        try:
+            count = session.query(func.count(FreightRate.id)).scalar()
+            if count == 0:
+                logger.info("数据库为空，从 CSV 导入...")
+                from database import init_db_if_needed
+                init_db_if_needed(force=False)
+        finally:
+            session.close()
+
+    @property
+    def df(self):
+        """惰性加载 DataFrame，供 GraphRouter 使用（兼容 CSVDataStore 接口）"""
+        if self._df is None:
+            self._load_df()
+        return self._df
+
+    def _load_df(self):
+        """从数据库加载全量数据到 DataFrame"""
+        from db_models import FreightRate
+        session = self._session()
+        try:
+            rows = session.query(FreightRate).all()
+            if not rows:
+                self._df = pd.DataFrame()
+                return
+            data = [row.to_dict() for row in rows]
+            self._df = pd.DataFrame(data)
+            # 统一列名，与 CSVDataStore 保持一致
+            self._df.rename(columns={
+                'carrier': 'Carrier',
+                'orig_port': 'Orig_Port',
+                'dest_port': 'Dest_Port',
+                'min_weight': 'Min_Weight_Quant',
+                'max_weight': 'Max_Weight_Quant',
+                'service_level': 'Service_Level',
+                'min_cost': 'Min_Cost',
+                'rate': 'Rate',
+                'mode': 'Mode_DSC',
+                'transport_days': 'TPT_Day_Count',
+                'carrier_type': 'Carrier_Type',
+                'service_rating': 'Service_Rating',
+            }, inplace=True)
+        finally:
+            session.close()
+
+    def _get_cached(self, key: str):
+        """获取缓存值，过期返回 None"""
+        if key in self._cache:
+            value, expire_time = self._cache[key]
+            if time.time() < expire_time:
+                return value
+            del self._cache[key]
+        return None
+
+    def _set_cached(self, key: str, value):
+        """设置缓存"""
+        self._cache[key] = (value, time.time() + self._cache_ttl)
+
+    def clear_cache(self):
+        """清除所有缓存"""
+        self._cache.clear()
+
+    def _session(self):
+        """获取新会话"""
+        return self._session_factory()
+
+    def get_available_ports(self) -> dict:
+        cached = self._get_cached("ports")
+        if cached is not None:
+            return cached
+
+        from sqlalchemy import distinct
+        from db_models import FreightRate
+
+        session = self._session()
+        try:
+            orig_ports = sorted([
+                r[0] for r in session.query(distinct(FreightRate.orig_port)).all()
+            ])
+            dest_ports = sorted([
+                r[0] for r in session.query(distinct(FreightRate.dest_port)).all()
+            ])
+            result = {"orig_ports": orig_ports, "dest_ports": dest_ports}
+            self._set_cached("ports", result)
+            return result
+        finally:
+            session.close()
+
+    def count_matching(self, weight: float, orig_port: str, dest_port: str) -> int:
+        from sqlalchemy import and_
+        from db_models import FreightRate
+
+        session = self._session()
+        try:
+            count = session.query(FreightRate).filter(
+                and_(
+                    FreightRate.orig_port == orig_port,
+                    FreightRate.dest_port == dest_port,
+                    FreightRate.min_weight <= weight,
+                    FreightRate.max_weight >= weight,
+                )
+            ).count()
+            return count
+        finally:
+            session.close()
+
+    def get_statistics(self) -> dict:
+        cached = self._get_cached("statistics")
+        if cached is not None:
+            return cached
+
+        from sqlalchemy import func, distinct
+        from db_models import FreightRate
+
+        session = self._session()
+        try:
+            total = session.query(func.count(FreightRate.id)).scalar()
+            carriers = sorted([
+                r[0] for r in session.query(distinct(FreightRate.carrier)).all()
+            ])
+            orig_ports = sorted([
+                r[0] for r in session.query(distinct(FreightRate.orig_port)).all()
+            ])
+            dest_ports = sorted([
+                r[0] for r in session.query(distinct(FreightRate.dest_port)).all()
+            ])
+            modes = sorted([
+                r[0] for r in session.query(distinct(FreightRate.mode)).all()
+            ])
+            levels = sorted([
+                r[0] for r in session.query(distinct(FreightRate.service_level)).all()
+            ])
+            result = {
+                "total_records": total,
+                "carriers": carriers,
+                "orig_ports": orig_ports,
+                "dest_ports": dest_ports,
+                "transport_modes": modes,
+                "service_levels": levels,
+            }
+            self._set_cached("statistics", result)
+            return result
+        finally:
+            session.close()
+
+    def match_plans(self, order: OrderRequest) -> List[Dict[str, Any]]:
+        from sqlalchemy import and_
+        from db_models import FreightRate
+
+        session = self._session()
+        try:
+            # 检查路线是否存在
+            route_exists = session.query(FreightRate).filter(
+                and_(
+                    FreightRate.orig_port == order.orig_port,
+                    FreightRate.dest_port == order.dest_port,
+                )
+            ).first()
+            if not route_exists:
+                return []
+
+            # 精确匹配: weight BETWEEN min_weight AND max_weight
+            exact_rows = session.query(FreightRate).filter(
+                and_(
+                    FreightRate.orig_port == order.orig_port,
+                    FreightRate.dest_port == order.dest_port,
+                    FreightRate.min_weight <= order.weight,
+                    FreightRate.max_weight >= order.weight,
+                )
+            ).order_by(FreightRate.id).all()
+
+            if exact_rows:
+                return [self._row_to_dict(row, order.weight, is_exact=True) for row in exact_rows]
+
+            # 超重兜底: max_weight DESC, rate ASC LIMIT 1
+            fallback_row = session.query(FreightRate).filter(
+                and_(
+                    FreightRate.orig_port == order.orig_port,
+                    FreightRate.dest_port == order.dest_port,
+                )
+            ).order_by(
+                FreightRate.max_weight.desc(),
+                FreightRate.rate.asc(),
+            ).first()
+
+            if fallback_row:
+                return [self._row_to_dict(fallback_row, order.weight, is_exact=False)]
+
+            return []
+        finally:
+            session.close()
+
+    @staticmethod
+    def _row_to_dict(row, weight: float, is_exact: bool) -> dict:
+        """将 ORM 对象转为与 CSVDataStore 输出一致的字典"""
+        total_cost = max(float(row.min_cost), float(row.rate) * weight)
+        return {
+            "carrier": row.carrier,
+            "orig_port": row.orig_port,
+            "dest_port": row.dest_port,
+            "min_weight": float(row.min_weight),
+            "max_weight": float(row.max_weight),
+            "service_level": row.service_level,
+            "min_cost": float(row.min_cost),
+            "rate": float(row.rate),
+            "mode": row.mode,
+            "transport_days": int(row.transport_days),
+            "carrier_type": row.carrier_type,
+            "service_rating": row.service_rating,
+            "is_exact_match": is_exact,
+        }
+
+
+# ======================================================================
+# FreightService
+# ======================================================================
+
 class FreightService:
     """运费比价服务 - 支持高频查询缓存"""
 
-    def __init__(self, data_store: CSVDataStore):
+    def __init__(self, data_store: BaseDataStore):
         self.data_store = data_store
-        # 高频港口组合缓存（LRU策略，最多缓存100个组合）
         self._cache: Dict[str, ComparisonResult] = {}
         self._cache_max_size = 100
         self._cache_hits = 0
         self._cache_misses = 0
 
     def _get_cache_key(self, order: OrderRequest) -> str:
-        """生成缓存键"""
-        # 使用 (起运港, 目的港, 重量, 最大天数, 优先级) 作为缓存键
         return f"{order.orig_port}:{order.dest_port}:{order.weight}:{order.max_days}:{order.priority}"
 
     def _get_from_cache(self, order: OrderRequest) -> Optional[ComparisonResult]:
-        """从缓存获取结果"""
         key = self._get_cache_key(order)
         if key in self._cache:
             self._cache_hits += 1
@@ -183,16 +405,17 @@ class FreightService:
         return None
 
     def _put_to_cache(self, order: OrderRequest, result: ComparisonResult):
-        """将结果放入缓存"""
-        # 如果缓存已满，移除最早的条目
         if len(self._cache) >= self._cache_max_size:
             oldest_key = next(iter(self._cache))
             del self._cache[oldest_key]
         key = self._get_cache_key(order)
         self._cache[key] = result
 
+    def clear_compare_cache(self):
+        """清除比价结果缓存"""
+        self._cache.clear()
+
     def get_cache_stats(self) -> Dict[str, Any]:
-        """获取缓存统计信息"""
         total = self._cache_hits + self._cache_misses
         hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
         return {
@@ -209,18 +432,11 @@ class FreightService:
         return self.data_store.get_statistics()
 
     def calculate_cost(self, rate: float, min_cost: float, weight: float) -> float:
-        """计算运输成本: Cost = max(Min_Cost, Rate * Weight)"""
         calculated_cost = rate * weight
         return max(min_cost, calculated_cost)
 
     def calculate_score(self, plan: CarrierPlan, all_plans: List[CarrierPlan],
                        weights: ScoringWeights) -> tuple:
-        """
-        计算综合评分
-        Score = w1×成本归一化 + w2×时效归一化 + w3×服务评级归一化
-        返回: (总分, 评分明细字典)
-        """
-        # 1. 成本归一化 (越低越好，使用反向归一化)
         costs = [p.total_cost for p in all_plans]
         min_cost, max_cost = min(costs), max(costs)
         if max_cost > min_cost:
@@ -228,7 +444,6 @@ class FreightService:
         else:
             cost_score = 1.0
 
-        # 2. 时效归一化 (越快越好，使用反向归一化)
         days = [p.transport_days for p in all_plans]
         min_days, max_days = min(days), max(days)
         if max_days > min_days:
@@ -236,11 +451,9 @@ class FreightService:
         else:
             time_score = 1.0
 
-        # 3. 服务评级归一化 (A=1.0, B=0.8, C=0.6, D=0.4, E=0.2)
         rating_map = {'A': 1.0, 'B': 0.8, 'C': 0.6, 'D': 0.4, 'E': 0.2}
         service_score = rating_map.get(plan.service_rating, 0.5)
 
-        # 4. 加权计算
         total_score = (
             weights.cost_weight * cost_score +
             weights.time_weight * time_score +
@@ -257,11 +470,9 @@ class FreightService:
                 'service': weights.service_weight
             }
         }
-
         return round(total_score, 3), details
 
     def match_plans(self, order: OrderRequest) -> List[CarrierPlan]:
-        """匹配承运商方案 - 支持重量超标检测"""
         raw_plans = self.data_store.match_plans(order)
         plans = []
         for row in raw_plans:
@@ -290,40 +501,29 @@ class FreightService:
                       max_days: Optional[int] = None,
                       priority: Optional[str] = None,
                       weights: Optional[ScoringWeights] = None) -> Optional[Recommendation]:
-        """推荐最优方案 - 支持多维度评分，含次优方案回退机制"""
         if not plans:
             return None
 
-        # 检查是否为重量超标（非精确匹配）
         is_overweight = any(not p.is_exact_match for p in plans)
 
-        # 判断重量是否过重（超过1000吨，即1000000kg）
         if order_weight > 1000000:
-            # 重量过重，返回None，由前端显示"重量过重，未找到可用方案"
             return None
 
         filtered_plans = plans
         if max_days is not None:
             filtered_plans = [p for p in plans if p.transport_days <= max_days]
 
-        # 【优化2】次优方案回退机制：解决Bad Case 2 - 无方案时缺乏引导
-        # 当严格时效过滤后无方案时，自动放宽约束查找最近可用方案
         if not filtered_plans and max_days is not None and plans:
-            # 找到最接近时效要求的方案（运输天数最少的方案）
             sorted_by_days = sorted(plans, key=lambda x: x.transport_days)
             best_available = sorted_by_days[0]
-            # 返回次优方案，并在reason中标注是放宽时效后的推荐
             reason = f"【次优推荐】当前时效要求({max_days}天)内无可用方案，最短运输时间为{best_available.transport_days}天。"
             reason += f"建议放宽时效至{best_available.transport_days}天以上。"
             reason += f"推荐方案：承运商{best_available.carrier}，运输时间{best_available.transport_days}天，总成本${best_available.total_cost:.2f}。"
             return Recommendation(plan=best_available, reason=reason, rank=1)
 
-        # 【新增】重量超标次优推荐：当重量超过所有方案的最大重量时
         if is_overweight and filtered_plans:
-            # 找到最大重量范围的方案
             max_weight_plan = max(filtered_plans, key=lambda x: x.max_weight)
             max_weight_value = max_weight_plan.max_weight
-
             reason = f"因重量超标，请考虑是否分批运输。"
             reason += f"您的货物重量超过该路线所有承运商的最大承运范围（{max_weight_value}kg）。"
             reason += f"最接近的方案：承运商{max_weight_plan.carrier}，最大承运重量{max_weight_value}kg。"
@@ -333,40 +533,27 @@ class FreightService:
         if not filtered_plans:
             return None
 
-        # 如果没有指定权重，使用默认权重
-        # 注意：权重配置要确保推荐的方案是综合考虑的，而不是极端偏向某一个维度
         if weights is None:
             if priority == "time":
-                # 时效优先：时效权重较高，但也要考虑成本和服务
                 weights = ScoringWeights(cost_weight=0.3, time_weight=0.5, service_weight=0.2)
             elif priority == "cost":
-                # 成本优先：成本权重较高，但也要考虑时效和服务
                 weights = ScoringWeights(cost_weight=0.5, time_weight=0.3, service_weight=0.2)
             else:
-                # 均衡模式：综合考虑成本、时效、服务
                 weights = ScoringWeights(cost_weight=0.4, time_weight=0.3, service_weight=0.3)
 
-        # 计算每个方案的加权评分
         for plan in filtered_plans:
             score, details = self.calculate_score(plan, filtered_plans, weights)
             plan.score = score
             plan.score_details = details
 
-        # 统一使用加权评分排序（优先级通过调整权重实现，而非绕过评分体系）
         sorted_plans = sorted(filtered_plans, key=lambda x: x.score if x.score else 0, reverse=True)
         best_plan = sorted_plans[0]
-
-        # 生成推荐理由
         reason = self._generate_enhanced_reason(best_plan, plans, filtered_plans, max_days, weights)
-
         return Recommendation(plan=best_plan, reason=reason, rank=1)
 
     def _generate_reason(self, best: CarrierPlan, all_plans: List[CarrierPlan],
                          filtered_plans: List[CarrierPlan], max_days: Optional[int], priority: Optional[str] = None) -> str:
-        """生成推荐理由（基础版）"""
         reasons = []
-
-        # 根据优先级显示不同的推荐理由
         if priority == "time":
             reasons.append(f"时间最优：{best.transport_days}天，是最快的方案")
             reasons.append(f"成本：${best.total_cost:.2f}")
@@ -374,7 +561,6 @@ class FreightService:
             avg_cost = sum(p.total_cost for p in all_plans) / len(all_plans)
             savings = avg_cost - best.total_cost
             savings_pct = (savings / avg_cost) * 100
-
             if savings > 0:
                 reasons.append(f"成本最优：${best.total_cost:.2f}，比平均水平低${savings:.2f}({savings_pct:.1f}%)")
 
@@ -397,59 +583,41 @@ class FreightService:
     def _generate_enhanced_reason(self, best: CarrierPlan, all_plans: List[CarrierPlan],
                                  filtered_plans: List[CarrierPlan], max_days: Optional[int],
                                  weights: ScoringWeights) -> str:
-        """生成增强版推荐理由 - 包含评分详情"""
         reasons = []
-
-        # 总体评分
         if best.score is not None:
             reasons.append(f"综合评分：{best.score:.3f}/1.0（加权算法）")
-
-        # 各维度得分
         if best.score_details:
             details = best.score_details
             reasons.append(f"成本得分：{details['cost_score']:.3f}（权重{weights.cost_weight:.0%}）")
             reasons.append(f"时效得分：{details['time_score']:.3f}（权重{weights.time_weight:.0%}）")
             reasons.append(f"服务得分：{details['service_score']:.3f}（权重{weights.service_weight:.0%}）")
-
-        # 具体信息
         reasons.append(f"总成本：${best.total_cost:.2f}")
         reasons.append(f"运输时间：{best.transport_days}天")
         reasons.append(f"服务评级：{best.service_rating or '未评级'}")
-
         mode_cn = "空运" if best.mode == "AIR" else "陆运"
         reasons.append(f"运输方式：{mode_cn}")
-
         service_cn = "门到门" if best.service_level == "DTD" else "门到港"
         reasons.append(f"服务级别：{service_cn}")
-
         if max_days is not None and len(filtered_plans) < len(all_plans):
             reasons.append(f"时效过滤：从{len(all_plans)}个方案中筛选出{len(filtered_plans)}个满足要求")
-
         return "；".join(reasons)
 
     def _score_transfer_route(self, route: TransferRoute,
                               all_routes: List[TransferRoute],
                               weights: ScoringWeights) -> TransferRoute:
-        """
-        对转运路线应用与直达方案相同的多维度评分公式。
-        Score = w1*cost_norm + w2*time_norm + w3*service_norm
-        """
         if not all_routes:
             return route
 
-        # 成本归一化 (越低越好)
         costs = [r.total_min_cost for r in all_routes]
         min_c, max_c = min(costs), max(costs)
         cost_score = (1 - (route.total_min_cost - min_c) / (max_c - min_c)
                       if max_c > min_c else 1.0)
 
-        # 时效归一化 (越快越好, 用含转运时间的估算值)
         days = [r.total_estimated_days for r in all_routes]
         min_d, max_d = min(days), max(days)
         time_score = (1 - (route.total_estimated_days - min_d) / (max_d - min_d)
                       if max_d > min_d else 1.0)
 
-        # 服务评级归一化
         rating_map = {'A': 1.0, 'B': 0.8, 'C': 0.6, 'D': 0.4, 'E': 0.2}
         service_score = rating_map.get(route.avg_service_rating, 0.5)
 
@@ -473,15 +641,13 @@ class FreightService:
         return route
 
     def compare(self, order: OrderRequest) -> ComparisonResult:
-        """执行比价 - 直接复用现有兜底, 无直达时才启用转运搜索"""
         cached_result = self._get_from_cache(order)
         if cached_result:
             return cached_result
 
         plans = self.match_plans(order)
-        has_direct = len(plans) > 0
+        has_direct = any(p.is_exact_match for p in plans)
 
-        # 确定权重
         if order.weights:
             weights = order.weights
         elif order.priority == "time":
@@ -491,21 +657,18 @@ class FreightService:
         else:
             weights = ScoringWeights(cost_weight=0.4, time_weight=0.3, service_weight=0.3)
 
-        # 为直达方案计算评分
-        if plans:
-            for plan in plans:
-                score, details = self.calculate_score(plan, plans, weights)
+        exact_plans = [p for p in plans if p.is_exact_match]
+        if exact_plans:
+            for plan in exact_plans:
+                score, details = self.calculate_score(plan, exact_plans, weights)
                 plan.score = score
                 plan.score_details = details
 
-        # ── 现有兜底: recommend_plan 已处理超重/超时/次优推荐 ──
+        # 只在有精确匹配方案时才生成直达推荐，否则交给转运搜索
         recommendation = self.recommend_plan(
-            plans, order.weight, order.max_days, order.priority, weights
-        )
+            exact_plans, order.weight, order.max_days, order.priority, weights
+        ) if exact_plans else None
 
-        # ── 转运搜索: 只在完全无直达方案时启用 ──
-        # 注意: 如果 recommend_plan 返回了次优推荐 (超时/超重),
-        #      那说明存在直达方案, 不需要转运
         transfer_routes = None
         fallback_transfer = None
         fallback_reason = ""
@@ -518,24 +681,40 @@ class FreightService:
 
             all_transfer = routing_result.transfer_routes
             if all_transfer:
-                # 评分
                 for tr in all_transfer:
                     self._score_transfer_route(tr, all_transfer, weights)
                 all_transfer.sort(key=lambda r: r.score or 0, reverse=True)
                 transfer_routes = self._build_transfer_plans(all_transfer, router)
 
-                # 如果 recommend_plan 也没有给出推荐 (plans为空), 用最优转运作为推荐
                 if not recommendation:
                     best_transfer = all_transfer[0]
+                    # 用最优转运方案的第一段构建推荐
+                    best_first_leg = min(best_transfer.legs[0], key=lambda x: x['total_cost'])
+                    rec_plan = CarrierPlan(
+                        carrier=best_first_leg['carrier'],
+                        orig_port=best_first_leg['orig_port'],
+                        dest_port=best_first_leg['dest_port'],
+                        min_weight=best_first_leg['min_weight'],
+                        max_weight=best_first_leg['max_weight'],
+                        service_level=best_first_leg['service_level'],
+                        min_cost=best_first_leg['min_cost'],
+                        rate=best_first_leg['rate'],
+                        mode=best_first_leg['mode'],
+                        transport_days=best_transfer.total_estimated_days,
+                        carrier_type=best_first_leg['carrier_type'],
+                        total_cost=best_transfer.total_min_cost,
+                        cost_formula=f"转运{best_transfer.hop_count}段合计",
+                        service_rating=best_transfer.avg_service_rating,
+                        score=best_transfer.score,
+                    )
                     reason = (
                         f"转运推荐: 经{best_transfer.hop_count}次中转 "
                         f"{' → '.join(best_transfer.path)}, "
                         f"总成本${best_transfer.total_min_cost:.2f}, "
                         f"预计{best_transfer.total_estimated_days}天"
                     )
-                    # 不能直接设 recommendation (类型不匹配), 通过 transfer_routes 传
+                    recommendation = Recommendation(plan=rec_plan, reason=reason, rank=1)
 
-            # 转运也失败 → 次优推荐 (复用与 recommend_plan 一致的措辞风格)
             if not transfer_routes and routing_result.fallback_route:
                 fb = routing_result.fallback_route
                 fallback_transfer = self._build_single_transfer_plan(fb, router)
@@ -563,7 +742,7 @@ class FreightService:
             order_info=order,
             available_plans=plans,
             recommended_plan=recommendation,
-            total_plans_found=len(plans),
+            total_plans_found=len(exact_plans),
             filtered_by_time=order.max_days is not None,
             scoring_weights={
                 'cost_weight': weights.cost_weight,
@@ -581,7 +760,6 @@ class FreightService:
 
     def _build_transfer_plans(self, routes: List[TransferRoute],
                                router: GraphRouter) -> List[TransferPlan]:
-        """将 TransferRoute 列表转为 TransferPlan 列表"""
         plans = []
         for route in routes:
             tp = self._build_single_transfer_plan(route, router)
@@ -590,7 +768,6 @@ class FreightService:
 
     def _build_single_transfer_plan(self, route: TransferRoute,
                                      router: GraphRouter) -> TransferPlan:
-        """将单个 TransferRoute 转为 TransferPlan"""
         legs = []
         for i, leg_plans in enumerate(route.legs):
             best = min(leg_plans, key=lambda x: x['total_cost'])

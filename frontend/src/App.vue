@@ -72,11 +72,15 @@
           <div v-else class="panel empty-recommendation">
             <p class="eyebrow">推荐方案</p>
             <h2 v-if="result && result.transfer_routes && result.transfer_routes.length > 0">转运方案</h2>
+            <h2 v-else-if="result">未找到方案</h2>
             <h2 v-else>等待运输需求</h2>
             <p v-if="result && result.transfer_routes && result.transfer_routes.length > 0">
               未找到直达路线，已为您找到 {{ result.transfer_routes.length }} 条转运方案，请查看下方详情。
             </p>
-            <p v-else>输入自然语言需求或手动调整订单字段后，系统会匹配 CSV 费率并给出推荐。</p>
+            <p v-else-if="result">
+              当前查询条件（{{ result.order_info?.orig_port }} → {{ result.order_info?.dest_port }}，{{ result.order_info?.weight }}kg）未匹配到可用方案，请调整重量或港口后重试。
+            </p>
+            <p v-else>输入自然语言需求或手动调整订单字段后，系统会匹配费率并给出推荐。</p>
           </div>
         </div>
 
@@ -298,6 +302,13 @@ const handleAgentUpdate = (data) => {
   // 捕获用户输入文本
   if (data._userText) {
     lastUserInput.value = data._userText
+  }
+
+  // 新查询开始时清除旧的比价结果，避免旧推荐残留误导用户
+  if (data.reply_type === 'processing' || data.reply_type === 'no_result') {
+    result.value = null
+    report.value = ''
+    flowStep.value = 0
   }
 
   agentSnapshot.value = data

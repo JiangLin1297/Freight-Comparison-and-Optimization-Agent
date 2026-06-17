@@ -5,45 +5,102 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import os
+import logging
 
-# 手动加载 .env 文件
-env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
-if os.path.exists(env_path):
-    with open(env_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                os.environ[key.strip()] = value.strip()
+logger = logging.getLogger(__name__)
 
+import config
 from models import OrderRequest, ComparisonResult
 
 
 class DocxExportRequest(OrderRequest):
     feedback: Optional[str] = None
-from freight_service import FreightService, CSVDataStore
+
+
+# 数据源实例（启动时初始化）
+data_store = None
+freight_service = None
+active_data_source = "unknown"
+
+
+def _init_data_source():
+    """根据配置初始化数据源，失败时自动降级到 CSV"""
+    global data_store, freight_service, active_data_source
+
+    if config.DATA_STORE == "sqlite":
+        try:
+            from database import init_db_if_needed, check_db_integrity, get_session_factory
+            from freight_service import DBDataStore, FreightService
+
+            # 尝试初始化数据库
+            if not init_db_if_needed():
+                raise RuntimeError("数据库初始化失败")
+
+            if not check_db_integrity(config.EXPECTED_MIN_ROW_COUNT):
+                raise RuntimeError("数据库完整性检查失败")
+
+            session_factory = get_session_factory()
+            data_store = DBDataStore(session_factory, auto_init=False)
+            freight_service = FreightService(data_store)
+            active_data_source = "sqlite"
+            logger.info("数据源: SQLite")
+            return
+        except Exception as e:
+            logger.error(f"SQLite 初始化失败，降级到 CSV: {e}")
+
+    # CSV 模式或降级
+    try:
+        from freight_service import CSVDataStore, FreightService
+
+        data_dir = config.CSV_DATA_DIR
+        candidates = [
+            os.path.join(data_dir, "FreightRates_combined.csv"),
+            os.path.join(data_dir, "FreightRates_with_rating.csv"),
+            os.path.join(data_dir, "FreightRates.csv"),
+        ]
+        csv_path = None
+        for p in candidates:
+            if os.path.exists(p):
+                csv_path = p
+                break
+
+        if csv_path is None:
+            raise FileNotFoundError(f"未找到 CSV 文件: {data_dir}")
+
+        extended_path = os.path.join(data_dir, "FreightRates_extended.csv")
+        data_store = CSVDataStore(csv_path, extended_path if csv_path != extended_path else None)
+        freight_service = FreightService(data_store)
+        active_data_source = "csv"
+        logger.info(f"数据源: CSV ({csv_path})")
+    except Exception as e:
+        logger.error(f"CSV 初始化也失败: {e}")
+        raise
+
+
+# 初始化数据源
+_init_data_source()
 
 # 工具管理器导入
+tool_manager = None
 try:
     from tools import setup_tools, ToolManager
     tool_manager = setup_tools()
     print(f"工具管理器初始化成功，已注册 {len(tool_manager.tools)} 个工具")
 except Exception as e:
     print(f"工具管理器初始化失败: {e}")
-    tool_manager = None
 
 # LLM服务可选导入
+llm_service = None
 try:
     from llm_service import LLMService
     llm_service = LLMService(tool_manager=tool_manager)
 except Exception as e:
     print(f"LLM服务初始化失败: {e}")
-    llm_service = None
 
 app = FastAPI(
     title="运输方案比价与优化智能体",
     description="根据订单信息自动匹配承运商报价，完成运费核算和多方案比价",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # CORS配置
@@ -54,28 +111,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# 使用CSV数据源（优先使用带评级的数据文件）
-DATA_PATH_WITH_RATING = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates_with_rating.csv")
-DATA_PATH_ORIGINAL = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates.csv")
-DATA_PATH_EXTENDED = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates_extended.csv")
-DATA_PATH_COMBINED = os.path.join(os.path.dirname(__file__), "..", "data", "FreightRates_combined.csv")
-
-# 优先使用合并数据（包含扩展数据）
-if os.path.exists(DATA_PATH_COMBINED):
-    DATA_PATH = DATA_PATH_COMBINED
-    print(f"使用合并 CSV 数据源: {DATA_PATH}")
-elif os.path.exists(DATA_PATH_WITH_RATING):
-    DATA_PATH = DATA_PATH_WITH_RATING
-    print(f"使用带评级的 CSV 数据源: {DATA_PATH}")
-else:
-    DATA_PATH = DATA_PATH_ORIGINAL
-    print(f"使用原始 CSV 数据源: {DATA_PATH}")
-
-# 加载数据（如果存在扩展数据，会自动合并）
-data_store = CSVDataStore(DATA_PATH, DATA_PATH_EXTENDED if DATA_PATH != DATA_PATH_EXTENDED else None)
-
-freight_service = FreightService(data_store)
 
 
 class ChatRequest(BaseModel):
@@ -127,7 +162,7 @@ async def get_ports():
 async def get_statistics():
     """获取数据统计信息"""
     stats = freight_service.get_statistics()
-    stats["data_source"] = "csv"
+    stats["data_source"] = active_data_source
     return stats
 
 
@@ -144,7 +179,6 @@ async def compare_freight(order: OrderRequest):
         result = freight_service.compare(order)
         return result
     except Exception as e:
-        # 【优化4】将Pydantic原始报错转换为友好的错误信息
         error_msg = str(e)
         if "greater_than" in error_msg:
             raise HTTPException(status_code=400, detail="参数错误：货物重量必须大于0，请检查输入")
@@ -340,7 +374,7 @@ async def agentic_chat(request: ChatRequest):
                 "message": message,
                 "intent": intent,
                 "missing_fields": missing,
-                "order": order_info.dict() if order_info else None,
+                "order": order_info.model_dump() if order_info else None,
                 "recommendation": None, "plans": [],
                 "next_actions": [f"请提供{'、'.join(missing_cn)}"],
                 "response": message,
@@ -367,7 +401,7 @@ async def agentic_chat(request: ChatRequest):
                     "message": f"订单参数无效：重量必须大于0，港口代码需在PORT02-PORT11范围内",
                     "intent": intent,
                     "missing_fields": missing,
-                    "order": order_info.dict() if order_info else None,
+                    "order": order_info.model_dump() if order_info else None,
                     "recommendation": None, "plans": [],
                     "next_actions": ["检查港口代码是否正确", "确认重量大于0"],
                     "response": "订单参数无效",
@@ -389,7 +423,7 @@ async def agentic_chat(request: ChatRequest):
                     total_cost=plan.total_cost,
                     service_rating=plan.service_rating,
                     score=plan.score
-                ).dict())
+                ).model_dump())
 
             # ---- 3b-i: 有推荐方案 → recommendation ----
             if result.recommended_plan or result.transfer_routes:
@@ -417,7 +451,7 @@ async def agentic_chat(request: ChatRequest):
                 fb = llm_service.generate_agent_feedback(
                     user_message=request.message,
                     order=order,
-                    recommendation=rec.dict() if rec else None,
+                    recommendation=rec.model_dump() if rec else None,
                     plans=plans_data,
                     total_plans_found=result.total_plans_found,
                     scoring_weights=result.scoring_weights,
@@ -445,8 +479,8 @@ async def agentic_chat(request: ChatRequest):
                     "feedback_reason": feedback_reason,
                     "intent": intent,
                     "missing_fields": [],
-                    "order": order_info.dict() if order_info else None,
-                    "recommendation": rec.dict() if rec else None,
+                    "order": order_info.model_dump() if order_info else None,
+                    "recommendation": rec.model_dump() if rec else None,
                     "plans": plans_data,
                     "transfer_routes": transfer_data,
                     "fallback_transfer": fallback_data,
@@ -504,7 +538,7 @@ async def agentic_chat(request: ChatRequest):
                     "message": fb["message"],
                     "intent": intent,
                     "missing_fields": [],
-                    "order": order_info.dict() if order_info else None,
+                    "order": order_info.model_dump() if order_info else None,
                     "recommendation": None, "plans": [],
                     "next_actions": next_actions,
                     "response": fb["message"],
@@ -597,7 +631,7 @@ async def agentic_chat(request: ChatRequest):
                 "message": llm_result.get("response", ""),
                 "intent": intent,
                 "missing_fields": missing,
-                "order": order_info.dict() if order_info else None,
+                "order": order_info.model_dump() if order_info else None,
                 "recommendation": None, "plans": [],
                 "next_actions": [],
                 "response": llm_result.get("response", ""),
@@ -722,10 +756,76 @@ async def export_report(order: DocxExportRequest):
 async def get_status():
     """获取系统状态"""
     return {
-        "data_source": "csv",
+        "data_source": active_data_source,
         "llm_configured": llm_service.is_configured() if llm_service else False,
         "llm_model": llm_service.model if llm_service else "none",
     }
+
+
+# ================================================================
+# 管理接口
+# ================================================================
+
+@app.get("/admin/datasource")
+async def get_datasource_info():
+    """获取当前数据源信息"""
+    info = {
+        "active_source": active_data_source,
+        "config_data_store": config.DATA_STORE,
+        "db_path": config.DB_PATH,
+    }
+    if active_data_source == "sqlite":
+        from database import check_db_integrity
+        info["db_healthy"] = check_db_integrity()
+    return info
+
+
+@app.post("/admin/reload")
+async def reload_datasource():
+    """重新加载数据库（重新导入 CSV 并清缓存）"""
+    global data_store, freight_service, active_data_source
+
+    try:
+        if config.DATA_STORE == "sqlite":
+            from database import get_engine, get_session_factory, init_database, check_db_integrity
+            from freight_service import DBDataStore, FreightService
+            from db_models import FreightRate
+
+            # 清空表并重新导入
+            engine = get_engine()
+            init_database()
+
+            session = get_session_factory()()
+            try:
+                session.query(FreightRate).delete()
+                session.commit()
+            finally:
+                session.close()
+
+            from init_db import import_csv_to_db
+            import_csv_to_db()
+
+            if not check_db_integrity(config.EXPECTED_MIN_ROW_COUNT):
+                raise RuntimeError("数据库完整性检查失败")
+
+            session_factory = get_session_factory()
+            data_store = DBDataStore(session_factory, auto_init=False)
+            data_store._df = None  # 清除 DataFrame 缓存
+            freight_service = FreightService(data_store)
+            active_data_source = "sqlite"
+        else:
+            # CSV 模式: 重新加载
+            _init_data_source()
+
+        # 清除缓存
+        if hasattr(data_store, 'clear_cache'):
+            data_store.clear_cache()
+        freight_service.clear_compare_cache()
+
+        return {"success": True, "data_source": active_data_source, "message": "数据源已重新加载"}
+    except Exception as e:
+        logger.error(f"重新加载失败: {e}")
+        return {"success": False, "data_source": active_data_source, "message": f"重新加载失败: {e}"}
 
 
 def generate_report(result: ComparisonResult, feedback: str = None) -> str:
@@ -1067,7 +1167,5 @@ async def export_history_docx(request: HistoryExportRequest):
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

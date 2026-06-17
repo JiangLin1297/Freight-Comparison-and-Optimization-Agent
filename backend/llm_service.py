@@ -223,9 +223,11 @@ class LLMService:
                 messages=messages,
                 temperature=0.7,
                 max_tokens=2048,
+                timeout=60,
             )
             return response.choices[0].message.content
         except Exception as e:
+            logger.error(f"LLM对话异常: {type(e).__name__}: {e}")
             return f"LLM 调用失败: {str(e)}"
 
     def chat_with_tools(self, user_message: str, session_id: str = None) -> Dict[str, Any]:
@@ -392,6 +394,7 @@ class LLMService:
                 messages=messages,
                 temperature=0.1,
                 max_tokens=1500,
+                timeout=60,
             )
             content = response.choices[0].message.content.strip()
 
@@ -577,6 +580,7 @@ class LLMService:
                 messages=messages,
                 temperature=0.1,
                 max_tokens=800,
+                timeout=60,
             )
             content = response.choices[0].message.content.strip()
 
@@ -1018,6 +1022,7 @@ class LLMService:
                     ],
                     temperature=0.1,
                     max_tokens=4000,  # 推理模型需要大量 token 用于内部 reasoning
+                    timeout=60,
                 )
                 content = (response.choices[0].message.content or "").strip()
                 if content:
@@ -1029,14 +1034,19 @@ class LLMService:
                                 parse_source = "llm"
                             else:
                                 fallback_reason = "invalid_schema"
+                                logger.warning(f"LLM返回JSON缺少intent字段: {json_str[:200]}")
                         else:
                             fallback_reason = "json_decode_error"
+                            logger.warning(f"LLM返回JSON解析失败: {json_str[:200]}")
                     else:
                         fallback_reason = "no_json"
+                        logger.warning(f"LLM返回内容中无JSON: {content[:200]}")
                 else:
-                    fallback_reason = "no_json"  # empty response from API
-            except Exception:
+                    fallback_reason = "no_json"
+                    logger.warning("LLM返回空内容")
+            except Exception as e:
                 fallback_reason = "api_error"
+                logger.error(f"LLM API调用异常: {type(e).__name__}: {e}")
         else:
             fallback_reason = "llm_not_configured"
 
@@ -1504,9 +1514,11 @@ class LLMService:
                 ],
                 temperature=0.3,
                 max_tokens=2000,
+                timeout=60,
             )
             content = (response.choices[0].message.content or "").strip()
-        except Exception:
+        except Exception as e:
+            logger.error(f"LLM反馈生成异常: {type(e).__name__}: {e}")
             return {
                 "message": self._build_template_feedback(
                     reply_type, order, recommendation, plans,
