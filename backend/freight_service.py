@@ -1,8 +1,10 @@
-"""运费比价服务 - 使用CSV数据源，支持多维度评分"""
+"""运费比价服务 - 使用CSV数据源，支持多维度评分和转运路径搜索"""
 import os
 import pandas as pd
 from typing import List, Optional, Dict, Any
-from models import OrderRequest, CarrierPlan, ComparisonResult, Recommendation, ScoringWeights
+from models import (OrderRequest, CarrierPlan, ComparisonResult, Recommendation,
+                    ScoringWeights, TransferPlan, LegPlan)
+from graph_router import GraphRouter, RoutingResult, TransferRoute
 
 
 class CSVDataStore:
@@ -425,37 +427,137 @@ class FreightService:
 
         return "；".join(reasons)
 
+    def _score_transfer_route(self, route: TransferRoute,
+                              all_routes: List[TransferRoute],
+                              weights: ScoringWeights) -> TransferRoute:
+        """
+        对转运路线应用与直达方案相同的多维度评分公式。
+        Score = w1*cost_norm + w2*time_norm + w3*service_norm
+        """
+        if not all_routes:
+            return route
+
+        # 成本归一化 (越低越好)
+        costs = [r.total_min_cost for r in all_routes]
+        min_c, max_c = min(costs), max(costs)
+        cost_score = (1 - (route.total_min_cost - min_c) / (max_c - min_c)
+                      if max_c > min_c else 1.0)
+
+        # 时效归一化 (越快越好, 用含转运时间的估算值)
+        days = [r.total_estimated_days for r in all_routes]
+        min_d, max_d = min(days), max(days)
+        time_score = (1 - (route.total_estimated_days - min_d) / (max_d - min_d)
+                      if max_d > min_d else 1.0)
+
+        # 服务评级归一化
+        rating_map = {'A': 1.0, 'B': 0.8, 'C': 0.6, 'D': 0.4, 'E': 0.2}
+        service_score = rating_map.get(route.avg_service_rating, 0.5)
+
+        total_score = round(
+            weights.cost_weight * cost_score +
+            weights.time_weight * time_score +
+            weights.service_weight * service_score, 3
+        )
+
+        route.score = total_score
+        route.score_details = {
+            'cost_score': round(cost_score, 3),
+            'time_score': round(time_score, 3),
+            'service_score': round(service_score, 3),
+            'weights': {
+                'cost': weights.cost_weight,
+                'time': weights.time_weight,
+                'service': weights.service_weight
+            }
+        }
+        return route
+
     def compare(self, order: OrderRequest) -> ComparisonResult:
-        """执行比价 - 支持多维度评分和高频查询缓存"""
-        # 检查缓存
+        """执行比价 - 直接复用现有兜底, 无直达时才启用转运搜索"""
         cached_result = self._get_from_cache(order)
         if cached_result:
             return cached_result
 
         plans = self.match_plans(order)
+        has_direct = len(plans) > 0
 
-        # 确定使用的权重
-        # 注意：权重配置要确保推荐的方案是综合考虑的，而不是极端偏向某一个维度
+        # 确定权重
         if order.weights:
             weights = order.weights
         elif order.priority == "time":
-            # 时效优先：时效权重较高，但也要考虑成本和服务
             weights = ScoringWeights(cost_weight=0.3, time_weight=0.5, service_weight=0.2)
         elif order.priority == "cost":
-            # 成本优先：成本权重较高，但也要考虑时效和服务
             weights = ScoringWeights(cost_weight=0.5, time_weight=0.3, service_weight=0.2)
         else:
-            # 均衡模式：综合考虑成本、时效、服务
             weights = ScoringWeights(cost_weight=0.4, time_weight=0.3, service_weight=0.3)
 
-        # 【新增】为所有方案计算评分（确保每个方案都有综合评分）
+        # 为直达方案计算评分
         if plans:
             for plan in plans:
                 score, details = self.calculate_score(plan, plans, weights)
                 plan.score = score
                 plan.score_details = details
 
-        recommendation = self.recommend_plan(plans, order.weight, order.max_days, order.priority, weights)
+        # ── 现有兜底: recommend_plan 已处理超重/超时/次优推荐 ──
+        recommendation = self.recommend_plan(
+            plans, order.weight, order.max_days, order.priority, weights
+        )
+
+        # ── 转运搜索: 只在完全无直达方案时启用 ──
+        # 注意: 如果 recommend_plan 返回了次优推荐 (超时/超重),
+        #      那说明存在直达方案, 不需要转运
+        transfer_routes = None
+        fallback_transfer = None
+        fallback_reason = ""
+
+        if not has_direct:
+            router = GraphRouter(self.data_store)
+            routing_result = router.find_routes(
+                order.orig_port, order.dest_port, order.weight, order.max_days
+            )
+
+            all_transfer = routing_result.transfer_routes
+            if all_transfer:
+                # 评分
+                for tr in all_transfer:
+                    self._score_transfer_route(tr, all_transfer, weights)
+                all_transfer.sort(key=lambda r: r.score or 0, reverse=True)
+                transfer_routes = self._build_transfer_plans(all_transfer, router)
+
+                # 如果 recommend_plan 也没有给出推荐 (plans为空), 用最优转运作为推荐
+                if not recommendation:
+                    best_transfer = all_transfer[0]
+                    reason = (
+                        f"转运推荐: 经{best_transfer.hop_count}次中转 "
+                        f"{' → '.join(best_transfer.path)}, "
+                        f"总成本${best_transfer.total_min_cost:.2f}, "
+                        f"预计{best_transfer.total_estimated_days}天"
+                    )
+                    # 不能直接设 recommendation (类型不匹配), 通过 transfer_routes 传
+
+            # 转运也失败 → 次优推荐 (复用与 recommend_plan 一致的措辞风格)
+            if not transfer_routes and routing_result.fallback_route:
+                fb = routing_result.fallback_route
+                fallback_transfer = self._build_single_transfer_plan(fb, router)
+                if order.max_days is not None and fb.is_direct:
+                    fallback_reason = (
+                        f"【次优推荐】当前时效要求({order.max_days}天)内无可用方案，"
+                        f"最短运输时间为{fb.total_estimated_days}天。"
+                        f"建议放宽时效至{fb.total_estimated_days}天以上。"
+                    )
+                elif order.max_days is not None:
+                    fallback_reason = (
+                        f"【次优推荐】当前时效要求({order.max_days}天)内无可用方案，"
+                        f"最快转运方案需要{fb.total_estimated_days}天"
+                        f"(经{fb.hop_count}次中转)。"
+                        f"建议放宽时效要求。"
+                    )
+                else:
+                    fallback_reason = (
+                        f"【次优推荐】未找到直达方案，"
+                        f"最近转运路径: {' → '.join(fb.path)}，"
+                        f"预计{fb.total_estimated_days}天。"
+                    )
 
         result = ComparisonResult(
             order_info=order,
@@ -467,10 +569,77 @@ class FreightService:
                 'cost_weight': weights.cost_weight,
                 'time_weight': weights.time_weight,
                 'service_weight': weights.service_weight
-            }
+            },
+            has_direct_route=has_direct,
+            transfer_routes=transfer_routes,
+            fallback_transfer=fallback_transfer,
+            fallback_reason=fallback_reason
         )
 
-        # 将结果放入缓存
         self._put_to_cache(order, result)
-
         return result
+
+    def _build_transfer_plans(self, routes: List[TransferRoute],
+                               router: GraphRouter) -> List[TransferPlan]:
+        """将 TransferRoute 列表转为 TransferPlan 列表"""
+        plans = []
+        for route in routes:
+            tp = self._build_single_transfer_plan(route, router)
+            plans.append(tp)
+        return plans
+
+    def _build_single_transfer_plan(self, route: TransferRoute,
+                                     router: GraphRouter) -> TransferPlan:
+        """将单个 TransferRoute 转为 TransferPlan"""
+        legs = []
+        for i, leg_plans in enumerate(route.legs):
+            best = min(leg_plans, key=lambda x: x['total_cost'])
+            leg = LegPlan(
+                from_port=route.path[i],
+                to_port=route.path[i + 1],
+                carrier=best['carrier'],
+                mode=best['mode'],
+                service_level=best['service_level'],
+                transport_days=best['transport_days'],
+                total_cost=best['total_cost'],
+                cost_formula=best['cost_formula'],
+                service_rating=best.get('service_rating', 'C')
+            )
+            legs.append(leg)
+
+        leg_details = []
+        for j, leg in enumerate(legs):
+            mode_cn = "空运" if leg.mode == "AIR" else "陆运"
+            svc_cn = "门到门" if leg.service_level == "DTD" else "门到港"
+            leg_details.append(
+                f"第{j+1}段 {leg.from_port}→{leg.to_port}: "
+                f"{leg.carrier} {mode_cn}({svc_cn}) "
+                f"${leg.total_cost:.2f} / {leg.transport_days}天"
+            )
+
+        score_info = ""
+        if route.score is not None:
+            score_info = f", 综合评分{route.score:.3f}"
+
+        reason_parts = [
+            f"转运方案 (经{route.hop_count}次中转): {' → '.join(route.path)}",
+            f"总成本: ${route.total_min_cost:.2f}{score_info}",
+            f"总耗时: {route.total_estimated_days}天 "
+            f"(运输{route.total_min_days}天 + 转运{route.hop_count * route.transfer_penalty_days}天)"
+        ]
+
+        return TransferPlan(
+            path=route.path,
+            legs=legs,
+            total_cost=round(route.total_min_cost, 2),
+            total_days=route.total_min_days,
+            hop_count=route.hop_count,
+            transfer_penalty_days=route.transfer_penalty_days,
+            total_estimated_days=route.total_estimated_days,
+            is_direct=False,
+            route_display=router.format_route_display(route),
+            leg_details=leg_details,
+            recommendation_reason="; ".join(reason_parts),
+            score=route.score,
+            avg_service_rating=route.avg_service_rating
+        )

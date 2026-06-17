@@ -48,6 +48,37 @@ class Recommendation(BaseModel):
     rank: int
 
 
+class LegPlan(BaseModel):
+    """转运路线中的一段"""
+    from_port: str
+    to_port: str
+    carrier: str
+    mode: str
+    service_level: str
+    transport_days: int
+    total_cost: float
+    cost_formula: str
+    service_rating: Optional[str] = None
+
+
+class TransferPlan(BaseModel):
+    """转运方案 (多跳路由)"""
+    path: List[str]
+    legs: List[LegPlan]
+    total_cost: float
+    total_days: int
+    hop_count: int
+    transfer_penalty_days: int = 1
+    total_estimated_days: int = 0
+    is_direct: bool = True
+    route_display: str = ""
+    score: Optional[float] = None                      # 综合评分 (与直达可比)
+    avg_service_rating: Optional[str] = None           # 各段最低服务评级
+    # 多段推荐理由
+    leg_details: List[str] = Field(default_factory=list)
+    recommendation_reason: str = ""
+
+
 class ComparisonResult(BaseModel):
     """比价结果模型"""
     order_info: OrderRequest
@@ -56,6 +87,17 @@ class ComparisonResult(BaseModel):
     total_plans_found: int
     filtered_by_time: bool
     scoring_weights: Optional[Dict] = Field(None, description="使用的评分权重配置")
+    # 转运相关字段
+    has_direct_route: bool = Field(True, description="是否存在直达路线")
+    transfer_routes: Optional[List[TransferPlan]] = Field(
+        None, description="转运路线方案 (无直达或直达被过滤时提供)"
+    )
+    fallback_transfer: Optional[TransferPlan] = Field(
+        None, description="次优推荐转运方案 (所有方案都不满足条件时)"
+    )
+    fallback_reason: str = Field(
+        "", description="次优推荐原因说明"
+    )
 
 
 # ============================================================

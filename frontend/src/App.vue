@@ -71,17 +71,21 @@
 
           <div v-else class="panel empty-recommendation">
             <p class="eyebrow">推荐方案</p>
-            <h2>等待运输需求</h2>
-            <p>输入自然语言需求或手动调整订单字段后，系统会匹配 CSV 费率并给出推荐。</p>
+            <h2 v-if="result && result.transfer_routes && result.transfer_routes.length > 0">转运方案</h2>
+            <h2 v-else>等待运输需求</h2>
+            <p v-if="result && result.transfer_routes && result.transfer_routes.length > 0">
+              未找到直达路线，已为您找到 {{ result.transfer_routes.length }} 条转运方案，请查看下方详情。
+            </p>
+            <p v-else>输入自然语言需求或手动调整订单字段后，系统会匹配 CSV 费率并给出推荐。</p>
           </div>
         </div>
 
         <FlowVisualization :step="flowStep" :result="result" :loading="loading" />
 
-        <ResultTable v-if="result && result.recommended_plan" :result="result" />
+        <ResultTable v-if="result && (result.recommended_plan || (result.transfer_routes && result.transfer_routes.length > 0))" :result="result" />
 
         <ExportCard
-          v-if="result"
+          v-if="result && (result.recommended_plan || (result.transfer_routes && result.transfer_routes.length > 0))"
           :report="report"
           :exporting="exporting"
           :downloading-word="downloadingWord"
@@ -237,7 +241,7 @@ const agentSteps = computed(() => {
   const replyType = snapshot?.reply_type
   const processing = replyType === 'processing'
   const hasOrder = Boolean(snapshot?.order)
-  const hasRecommendation = Boolean(snapshot?.recommendation || result.value?.recommended_plan)
+  const hasRecommendation = Boolean(snapshot?.recommendation || result.value?.recommended_plan || (result.value?.transfer_routes && result.value.transfer_routes.length > 0))
   const hasFeedback = Boolean(snapshot?.message)
 
   return [
@@ -258,14 +262,14 @@ const agentSteps = computed(() => {
     {
       key: 'match',
       title: '费率匹配',
-      desc: processing ? '完整订单确认后会匹配 CSV 费率' : result.value ? `找到 ${result.value.total_plans_found || 0} 个候选方案` : '等待完整订单后查询 CSV 费率',
+      desc: processing ? '完整订单确认后会匹配 CSV 费率' : result.value ? (result.value.transfer_routes && result.value.transfer_routes.length > 0 ? `找到 ${result.value.transfer_routes.length} 条转运方案` : `找到 ${result.value.total_plans_found || 0} 个候选方案`) : '等待完整订单后查询 CSV 费率',
       done: Boolean(result.value),
       active: loading.value
     },
     {
       key: 'score',
       title: '方案评分',
-      desc: hasRecommendation ? '已按当前权重生成推荐' : '成本、时效、服务评分待计算',
+      desc: hasRecommendation ? (result.value?.transfer_routes && result.value.transfer_routes.length > 0 ? '已找到转运方案并评分' : '已按当前权重生成推荐') : '成本、时效、服务评分待计算',
       done: hasRecommendation,
       active: Boolean(result.value) && !hasRecommendation
     },
@@ -360,10 +364,14 @@ const handleCompare = async () => {
     const isOverweight = result.value.available_plans?.some(plan => !plan.is_exact_match)
     const hasNoRecommendation = !result.value.recommended_plan
 
+    const hasTransferRoutes = result.value.transfer_routes && result.value.transfer_routes.length > 0
+
     if (hasNoRecommendation && isOverweight) {
       ElMessage.warning('重量过重，未找到可用方案')
     } else if (isOverweight) {
       ElMessage.warning('重量超标，建议考虑分批运输')
+    } else if (hasNoRecommendation && hasTransferRoutes) {
+      ElMessage.success(`找到 ${result.value.transfer_routes.length} 条转运方案`)
     } else {
       const priorityText = form.value.priority === 'time' ? '时效优先' :
         form.value.priority === 'cost' ? '成本优先' : '均衡模式'

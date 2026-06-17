@@ -1364,6 +1364,8 @@ class LLMService:
         parse_source: str = "llm",
         no_result_reason: str = None,
         next_actions: list = None,
+        transfer_routes: list = None,
+        fallback_transfer: dict = None,
     ) -> dict:
         """
         LLM 基于 FreightService 真实结果生成自然语言反馈。
@@ -1397,7 +1399,8 @@ class LLMService:
         # ---- 构建结果摘要 ----
         summary = self._build_result_summary(
             order, recommendation, plans, total_plans_found,
-            scoring_weights, reply_type, no_result_reason, next_actions
+            scoring_weights, reply_type, no_result_reason, next_actions,
+            transfer_routes, fallback_transfer
         )
 
         # ---- 调用 LLM ----
@@ -1454,9 +1457,10 @@ class LLMService:
 
     def _build_result_summary(
         self, order, recommendation, plans, total_plans_found,
-        scoring_weights, reply_type, no_result_reason, next_actions
+        scoring_weights, reply_type, no_result_reason, next_actions,
+        transfer_routes=None, fallback_transfer=None
     ) -> str:
-        """将 FreightService 结果构建为 LLM 可读的摘要"""
+        """将 FreightService 结果构建为 LLM 可读的摘要 (含转运路线)"""
         parts = []
 
         parts.append("【用户订单】")
@@ -1473,7 +1477,7 @@ class LLMService:
             parts.append(f"优先级: {pri_cn}")
 
         parts.append("")
-        parts.append(f"【查询结果】共找到 {total_plans_found} 个方案")
+        parts.append(f"【查询结果】共找到 {total_plans_found} 个直达方案")
         parts.append(f"回复类型: {reply_type}")
 
         if recommendation:
@@ -1497,13 +1501,32 @@ class LLMService:
 
         if plans:
             parts.append("")
-            parts.append("【候选方案列表】")
+            parts.append("【候选直达方案】")
             for i, p in enumerate(plans[:5]):
                 parts.append(
                     f"{i+1}. {p.get('carrier')} | {p.get('mode')} | {p.get('service_level')} | "
                     f"{p.get('transport_days')}天 | ${p.get('total_cost', 0):.2f} | "
                     f"评分{p.get('score', 0):.3f} | 评级{p.get('service_rating', 'N/A')}"
                 )
+
+        # ── 转运路线信息 ──
+        if transfer_routes:
+            parts.append("")
+            parts.append("【转运路线】未找到直达方案，以下是经中转港的转运方案：")
+            for i, tr in enumerate(transfer_routes[:3]):
+                parts.append(
+                    f"转运{i+1}: {' → '.join(tr.get('path', []))}, "
+                    f"总成本${tr.get('total_cost', 0):.2f}, "
+                    f"总耗时{tr.get('total_estimated_days', 0)}天, "
+                    f"经{tr.get('hop_count', 0)}次中转"
+                )
+
+        if fallback_transfer:
+            parts.append("")
+            parts.append("【次优推荐】当前条件下无满足方案，以下为最接近的转运路线：")
+            parts.append(f"路径: {' → '.join(fallback_transfer.get('path', []))}")
+            parts.append(f"总成本: ${fallback_transfer.get('total_cost', 0):.2f}")
+            parts.append(f"总耗时: {fallback_transfer.get('total_estimated_days', 0)}天")
 
         if no_result_reason:
             parts.append("")

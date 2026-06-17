@@ -357,31 +357,41 @@ async def agentic_chat(request: ChatRequest):
                 ).dict())
 
             # ---- 3b-i: 有推荐方案 → recommendation ----
-            if result.recommended_plan:
-                rp = result.recommended_plan.plan
-                rec = RecommendationSummary(
-                    carrier=rp.carrier,
-                    transport_days=rp.transport_days,
-                    total_cost=rp.total_cost,
-                    mode="空运" if rp.mode == "AIR" else "陆运",
-                    service_level="门到门" if rp.service_level == "DTD" else "门到港",
-                    service_rating=rp.service_rating,
-                    score=rp.score,
-                    reason=result.recommended_plan.reason
-                )
+            if result.recommended_plan or result.transfer_routes:
+                rp = result.recommended_plan.plan if result.recommended_plan else None
+                rec = None
+                if rp:
+                    rec = RecommendationSummary(
+                        carrier=rp.carrier,
+                        transport_days=rp.transport_days,
+                        total_cost=rp.total_cost,
+                        mode="空运" if rp.mode == "AIR" else "陆运",
+                        service_level="门到门" if rp.service_level == "DTD" else "门到港",
+                        service_rating=rp.service_rating,
+                        score=rp.score,
+                        reason=result.recommended_plan.reason
+                    )
+
+                # 构建转运路线数据
+                transfer_data = None
+                if result.transfer_routes:
+                    transfer_data = [t.model_dump() for t in result.transfer_routes]
+                fallback_data = result.fallback_transfer.model_dump() if result.fallback_transfer else None
 
                 # ---- LLM 反馈生成（阶段2） ----
                 fb = llm_service.generate_agent_feedback(
                     user_message=request.message,
                     order=order,
-                    recommendation=rec.dict(),
+                    recommendation=rec.dict() if rec else None,
                     plans=plans_data,
                     total_plans_found=result.total_plans_found,
                     scoring_weights=result.scoring_weights,
-                    reply_type="recommendation",
+                    reply_type="recommendation" if rec else "general",
                     intent=intent,
                     parse_source=parse_source,
                     next_actions=[],
+                    transfer_routes=transfer_data,
+                    fallback_transfer=fallback_data,
                 )
                 message = fb["message"]
                 feedback_source = fb["feedback_source"]
@@ -394,15 +404,18 @@ async def agentic_chat(request: ChatRequest):
                 ]
 
                 return {
-                    "reply_type": "recommendation",
+                    "reply_type": "recommendation" if rec else "general",
                     "message": message,
                     "feedback_source": feedback_source,
                     "feedback_reason": feedback_reason,
                     "intent": intent,
                     "missing_fields": [],
                     "order": order_info.dict() if order_info else None,
-                    "recommendation": rec.dict(),
+                    "recommendation": rec.dict() if rec else None,
                     "plans": plans_data,
+                    "transfer_routes": transfer_data,
+                    "fallback_transfer": fallback_data,
+                    "fallback_reason": result.fallback_reason or "",
                     "next_actions": next_actions,
                     "response": message,
                     "tool_calls": [{"tool": "compare_freight", "parameters": {
@@ -721,6 +734,21 @@ def generate_report(result: ComparisonResult, feedback: str = None) -> str:
         lines.append(f"  运输天数: {result.recommended_plan.plan.transport_days}天")
         lines.append(f"  总成本: ${result.recommended_plan.plan.total_cost:.2f}")
         lines.append(f"  推荐理由: {result.recommended_plan.reason}")
+    elif result.transfer_routes:
+        lines.append("【转运方案】(未找到直达路线)")
+        for i, tr in enumerate(result.transfer_routes):
+            lines.append(f"  转运{i+1}: {' → '.join(tr.path)}")
+            lines.append(f"    总成本: ${tr.total_cost:.2f} | 总耗时: {tr.total_estimated_days}天 | 经{tr.hop_count}次中转")
+            for j, leg in enumerate(tr.legs):
+                mode_cn = "空运" if leg.mode == "AIR" else "陆运"
+                svc_cn = "门到门" if leg.service_level == "DTD" else "门到港"
+                lines.append(f"    第{j+1}段 {leg.from_port}→{leg.to_port}: {leg.carrier} {mode_cn}({svc_cn}) ${leg.total_cost:.2f} / {leg.transport_days}天")
+    elif result.fallback_transfer:
+        lines.append("【次优推荐】")
+        fb = result.fallback_transfer
+        lines.append(f"  路径: {' → '.join(fb.path)}")
+        lines.append(f"  总成本: ${fb.total_cost:.2f} | 总耗时: {fb.total_estimated_days}天")
+        lines.append(f"  说明: {result.fallback_reason}")
     else:
         lines.append("【推荐方案】无满足条件的方案")
 
@@ -798,9 +826,9 @@ def generate_docx(result: ComparisonResult, feedback: str = None) -> bytes:
         fb_para = doc.add_paragraph(feedback)
         fb_para.paragraph_format.space_after = Pt(12)
 
-    # 推荐方案
-    doc.add_heading('推荐方案', level=1)
+    # 推荐方案 / 转运方案
     if result.recommended_plan:
+        doc.add_heading('推荐方案', level=1)
         rp = result.recommended_plan.plan
         mode_cn = '空运' if rp.mode == 'AIR' else '陆运'
         service_cn = '门到门' if rp.service_level == 'DTD' else '门到港'
@@ -819,7 +847,61 @@ def generate_docx(result: ComparisonResult, feedback: str = None) -> bytes:
         for i, (label, value) in enumerate(fields):
             rec_table.rows[i].cells[0].text = label
             rec_table.rows[i].cells[1].text = str(value)
+
+    elif result.transfer_routes:
+        doc.add_heading('转运方案（未找到直达路线）', level=1)
+        for i, tr in enumerate(result.transfer_routes):
+            doc.add_heading(f'转运路线 {i+1}: {" → ".join(tr.path)}', level=2)
+            tr_meta = doc.add_table(rows=3, cols=2)
+            tr_meta.style = 'Light Grid Accent 1'
+            tr_meta.alignment = WD_TABLE_ALIGNMENT.CENTER
+            meta_fields = [
+                ('总成本', f'${tr.total_cost:.2f}'),
+                ('总耗时', f'{tr.total_estimated_days} 天（运输 {tr.total_days} 天 + 转运 {tr.hop_count} 天）'),
+                ('综合评分', f'{tr.score:.3f} / 1.0' if tr.score is not None else '未评分'),
+            ]
+            for j, (label, value) in enumerate(meta_fields):
+                tr_meta.rows[j].cells[0].text = label
+                tr_meta.rows[j].cells[1].text = str(value)
+
+            # 每段明细
+            doc.add_paragraph('')
+            leg_headers = ['段次', '路线', '承运商', '运输方式', '服务级别', '运输天数', '费用']
+            leg_table = doc.add_table(rows=1, cols=len(leg_headers))
+            leg_table.style = 'Light Grid Accent 1'
+            leg_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            for k, h in enumerate(leg_headers):
+                leg_table.rows[0].cells[k].text = h
+
+            for j, leg in enumerate(tr.legs):
+                row = leg_table.add_row()
+                row.cells[0].text = f'第{j+1}段'
+                row.cells[1].text = f'{leg.from_port} → {leg.to_port}'
+                row.cells[2].text = leg.carrier
+                row.cells[3].text = '空运' if leg.mode == 'AIR' else '陆运'
+                row.cells[4].text = '门到门' if leg.service_level == 'DTD' else '门到港'
+                row.cells[5].text = f'{leg.transport_days} 天'
+                row.cells[6].text = f'${leg.total_cost:.2f}'
+
+    elif result.fallback_transfer:
+        doc.add_heading('次优推荐', level=1)
+        fb = result.fallback_transfer
+        fb_p = doc.add_paragraph(result.fallback_reason or '当前条件下无可用方案，以下为最接近的转运路线')
+        fb_p.paragraph_format.space_after = Pt(12)
+
+        fb_table = doc.add_table(rows=3, cols=2)
+        fb_table.style = 'Light Grid Accent 1'
+        fb_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        fb_fields = [
+            ('路径', ' → '.join(fb.path)),
+            ('总成本', f'${fb.total_cost:.2f}'),
+            ('总耗时', f'{fb.total_estimated_days} 天'),
+        ]
+        for j, (label, value) in enumerate(fb_fields):
+            fb_table.rows[j].cells[0].text = label
+            fb_table.rows[j].cells[1].text = str(value)
     else:
+        doc.add_heading('推荐方案', level=1)
         doc.add_paragraph('无满足条件的方案')
 
     # 页脚
