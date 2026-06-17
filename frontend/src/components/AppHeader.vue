@@ -5,39 +5,56 @@
       <h1>运输方案比价与优化智能体</h1>
       <p>自然语言解析、多轮补全、费率匹配与多维评分的一体化工作台。</p>
     </div>
-    <div class="header-badge">
-      <span>Agent v2</span>
-      <strong>LLM + Rules</strong>
+    <div
+      class="header-badge"
+      :class="{ 'badge--custom': hasCustomAgent }"
+      @click="$emit('open-settings')"
+    >
+      <span>{{ hasCustomAgent ? (customLabel || '自定义 Agent') : 'Agent v2' }}</span>
+      <strong>{{ hasCustomAgent ? (customSubtitle || '自定义接入') : 'LLM + Rules' }}</strong>
       <div class="llm-status">
         <span class="status-dot" :class="llmConnected ? 'connected' : 'disconnected'"></span>
         <span class="status-text">{{ llmConnected ? 'LLM 已连接' : 'LLM 未连接' }}</span>
-        <span v-if="llmModel" class="status-model">{{ llmModel }}</span>
+        <span v-if="displayModel" class="status-model">{{ displayModel }}</span>
       </div>
+      <span class="badge-hint">{{ hasCustomAgent ? '点击修改配置' : '点击接入你的 Agent' }}</span>
     </div>
   </header>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
+
+const props = defineProps({
+  hasCustomAgent: { type: Boolean, default: false },
+  customModel: { type: String, default: '' },
+  customLabel: { type: String, default: '' },
+  customSubtitle: { type: String, default: '' },
+})
+
+defineEmits(['open-settings'])
 
 const llmConnected = ref(false)
-const llmModel = ref('')
+const serverModel = ref('')
+
+const displayModel = computed(() => {
+  if (props.hasCustomAgent && props.customModel) return props.customModel
+  return serverModel.value || ''
+})
 
 const checkStatus = async () => {
   try {
     const res = await fetch('/api/status')
     const data = await res.json()
     llmConnected.value = data.llm_configured === true
-    llmModel.value = data.llm_model || ''
+    serverModel.value = data.llm_model || ''
   } catch {
     llmConnected.value = false
-    llmModel.value = ''
+    serverModel.value = ''
   }
 }
 
 onMounted(checkStatus)
-
-// 每 30 秒刷新一次状态
 setInterval(checkStatus, 30000)
 </script>
 
@@ -83,6 +100,20 @@ setInterval(checkStatus, 30000)
   min-width: 140px;
   padding: 12px 14px;
   text-align: right;
+  cursor: pointer;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.header-badge:hover {
+  border-color: #0f766e;
+  background: #f0fdfa;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.1);
+}
+
+.header-badge.badge--custom {
+  border-color: #0f766e;
+  background: #f0fdfa;
 }
 
 .header-badge span {
@@ -132,6 +163,14 @@ setInterval(checkStatus, 30000)
   background: #f1f5f9;
   padding: 1px 6px;
   border-radius: 4px;
+}
+
+.badge-hint {
+  display: block !important;
+  font-size: 11px !important;
+  color: #94a3b8;
+  margin-top: 4px;
+  margin-bottom: 0 !important;
 }
 
 @media (max-width: 720px) {

@@ -123,6 +123,10 @@ import { ref, nextTick, watch } from 'vue'
 import axios from 'axios'
 import { ChatDotRound, Close, Loading } from '@element-plus/icons-vue'
 
+const props = defineProps({
+  authHeaders: { type: Object, default: () => ({}) },
+})
+
 const isOpen = ref(false)
 const inputMsg = ref('')
 const messages = ref([])
@@ -150,7 +154,7 @@ const handleSend = async () => {
 
   try {
     const endpoint = useAgentic.value ? '/api/agentic_chat' : '/api/chat'
-    const { data } = await axios.post(endpoint, { message: userMsg })
+    const { data } = await axios.post(endpoint, { message: userMsg }, { headers: props.authHeaders })
 
     const assistantMsg = {
       role: 'assistant',

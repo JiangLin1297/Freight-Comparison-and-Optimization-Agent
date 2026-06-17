@@ -1,6 +1,19 @@
 <template>
   <div class="app-shell">
-    <AppHeader />
+    <AppHeader
+      :has-custom-agent="hasCustomAgent"
+      :custom-model="userCredentials.model"
+      :custom-label="userCredentials.label"
+      :custom-subtitle="userCredentials.subtitle"
+      @open-settings="settingsVisible = true"
+    />
+
+    <AgentSettings
+      v-model="settingsVisible"
+      :credentials="userCredentials"
+      @save="handleSaveCredentials"
+      @disconnect="handleDisconnectAgent"
+    />
 
     <section class="overview-strip">
       <StatisticsCard :statistics="statistics" />
@@ -8,7 +21,7 @@
 
     <main class="workbench">
       <section class="left-rail">
-        <NLInput @parsed="handleNLParsed" @agent-update="handleAgentUpdate" />
+        <NLInput @parsed="handleNLParsed" @agent-update="handleAgentUpdate" :auth-headers="authHeaders" />
 
         <div class="panel agent-panel">
           <div class="panel-header">
@@ -108,7 +121,7 @@
       </section>
     </main>
 
-    <ChatPanel />
+    <ChatPanel :auth-headers="authHeaders" />
   </div>
 </template>
 
@@ -117,6 +130,7 @@ import { computed, onMounted, ref, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
 import AppHeader from './components/AppHeader.vue'
+import AgentSettings from './components/AgentSettings.vue'
 import StatisticsCard from './components/StatisticsCard.vue'
 import CompareForm from './components/CompareForm.vue'
 import ResultTable from './components/ResultTable.vue'
@@ -126,6 +140,40 @@ import NLInput from './components/NLInput.vue'
 import FlowVisualization from './components/FlowVisualization.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import HistoryPanel from './components/HistoryPanel.vue'
+
+// ---- Agent 凭证管理 ----
+const AGENT_CREDENTIALS_KEY = 'agent_credentials'
+const settingsVisible = ref(false)
+
+const loadCredentials = () => {
+  try {
+    const raw = localStorage.getItem(AGENT_CREDENTIALS_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch { /* ignore */ }
+  return { api_key: '', base_url: '', model: '', label: '', subtitle: '' }
+}
+
+const userCredentials = ref(loadCredentials())
+const hasCustomAgent = computed(() => !!(userCredentials.value.api_key && userCredentials.value.base_url))
+
+const authHeaders = computed(() => {
+  if (!hasCustomAgent.value) return {}
+  return {
+    'X-API-Key': userCredentials.value.api_key,
+    'X-Base-URL': userCredentials.value.base_url,
+    'X-Model': userCredentials.value.model || '',
+  }
+})
+
+const handleSaveCredentials = (creds) => {
+  userCredentials.value = creds
+  localStorage.setItem(AGENT_CREDENTIALS_KEY, JSON.stringify(creds))
+}
+
+const handleDisconnectAgent = () => {
+  userCredentials.value = { api_key: '', base_url: '', model: '', label: '', subtitle: '' }
+  localStorage.removeItem(AGENT_CREDENTIALS_KEY)
+}
 
 const form = ref({
   weight: 100,

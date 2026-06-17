@@ -1,8 +1,11 @@
 import os
 import json
 import re
+import logging
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 # 港口名称 -> PORT代码 映射（支持中文名、英文名、常见别名）
 PORT_NAME_MAP = {
@@ -190,10 +193,10 @@ class ConversationSession:
 class LLMService:
     """LLM 服务 - 小米 MiMo v2 Token Plan，支持工具调用"""
 
-    def __init__(self, tool_manager=None):
-        self.api_key = os.getenv("DASHSCOPE_API_KEY", "")
-        self.model = os.getenv("DASHSCOPE_MODEL", "mimo-v2.5-pro")
-        self.base_url = os.getenv("DASHSCOPE_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
+    def __init__(self, tool_manager=None, api_key=None, base_url=None, model=None):
+        self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
+        self.model = model or os.getenv("DASHSCOPE_MODEL", "mimo-v2.5-pro")
+        self.base_url = base_url or os.getenv("DASHSCOPE_BASE_URL", "https://token-plan-cn.xiaomimimo.com/v1")
         self.client = None
         self.sessions: Dict[str, ConversationSession] = {}
         self.tool_manager = tool_manager
@@ -1790,3 +1793,18 @@ class LLMService:
     def is_configured(self) -> bool:
         """检查是否已配置 API Key"""
         return bool(self.api_key)
+
+    def test_connection(self) -> Dict[str, Any]:
+        """测试 LLM 连接是否可用，返回 {success, message, model}"""
+        if not self.client:
+            return {"success": False, "message": "未配置 API Key", "model": ""}
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+                timeout=15,
+            )
+            return {"success": True, "message": "连接成功", "model": self.model}
+        except Exception as e:
+            return {"success": False, "message": f"连接失败: {str(e)}", "model": self.model}

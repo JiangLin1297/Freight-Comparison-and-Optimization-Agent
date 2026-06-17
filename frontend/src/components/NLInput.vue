@@ -140,6 +140,10 @@ import { ref, computed } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
+const props = defineProps({
+  authHeaders: { type: Object, default: () => ({}) },
+})
+
 const emit = defineEmits(['parsed', 'agent-update'])
 
 const inputText = ref('')
@@ -220,7 +224,7 @@ const handleParse = async () => {
     const { data } = await axios.post('/api/agentic_chat', {
       message: inputText.value,
       session_id: sessionId.value || null
-    })
+    }, { headers: props.authHeaders })
     emit('agent-update', { ...data, _userText: userMsg })
 
     const rt = data.reply_type

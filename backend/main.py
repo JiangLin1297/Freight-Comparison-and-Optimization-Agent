@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -129,6 +129,30 @@ class ContinueRequest(BaseModel):
     message: str
 
 
+class TestLLMRequest(BaseModel):
+    api_key: str
+    base_url: str
+    model: Optional[str] = "mimo-v2.5-pro"
+
+
+def get_user_llm(request) -> object:
+    """从请求 headers 中读取用户凭证，返回对应的 LLMService 实例。
+    无用户凭证时返回全局 llm_service（本地 .env 配置）。"""
+    user_key = request.headers.get("X-API-Key")
+    user_url = request.headers.get("X-Base-URL")
+    user_model = request.headers.get("X-Model")
+
+    if user_key and user_url:
+        from llm_service import LLMService
+        return LLMService(
+            tool_manager=tool_manager,
+            api_key=user_key,
+            base_url=user_url,
+            model=user_model or "mimo-v2.5-pro",
+        )
+    return llm_service
+
+
 # 挂载前端静态文件
 STATIC_PATH = os.path.join(os.path.dirname(__file__), "static")
 FRONTEND_PATH = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -189,16 +213,34 @@ async def compare_freight(order: OrderRequest):
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, req: Request):
     """调用 LLM 进行对话"""
-    if llm_service is None:
+    active_llm = get_user_llm(req)
+    if active_llm is None:
         return {"response": "LLM服务未配置", "model": "none", "configured": False}
-    response = llm_service.chat(request.message, request.system_prompt)
-    return {"response": response, "model": llm_service.model, "configured": llm_service.is_configured()}
+    response = active_llm.chat(request.message, request.system_prompt)
+    return {"response": response, "model": active_llm.model, "configured": active_llm.is_configured()}
+
+
+@app.post("/api/test_llm")
+async def test_llm(request: TestLLMRequest):
+    """测试用户提供的 LLM 凭证是否可用"""
+    try:
+        from llm_service import LLMService
+        test_service = LLMService(
+            tool_manager=None,
+            api_key=request.api_key,
+            base_url=request.base_url,
+            model=request.model or "mimo-v2.5-pro",
+        )
+        result = test_service.test_connection()
+        return result
+    except Exception as e:
+        return {"success": False, "message": f"测试失败: {str(e)}", "model": ""}
 
 
 @app.post("/api/agentic_chat")
-async def agentic_chat(request: ChatRequest):
+async def agentic_chat(request: ChatRequest, req: Request):
     """
     Agentic 对话接口 v3 — LLM 主导解析 + 多轮槽位补全
 
@@ -227,8 +269,11 @@ async def agentic_chat(request: ChatRequest):
         OrderRequest
     )
 
+    # 获取当前活跃的 LLM 服务（用户凭证优先，fallback 到本地 .env）
+    active_llm = get_user_llm(req)
+
     # ---- 兜底: LLM 服务对象未初始化 ----
-    if llm_service is None:
+    if active_llm is None:
         return {
             "reply_type": "error",
             "message": "LLM服务未配置，请在 .env 文件中填写 DASHSCOPE_API_KEY",
@@ -248,8 +293,8 @@ async def agentic_chat(request: ChatRequest):
         # ================================================================
         partial_order = None
         session = None
-        if request.session_id and request.session_id in llm_service.sessions:
-            session = llm_service.sessions[request.session_id]
+        if request.session_id and request.session_id in active_llm.sessions:
+            session = active_llm.sessions[request.session_id]
             partial_order = session.partial_data if session.partial_data else None
 
         # ================================================================
@@ -268,7 +313,7 @@ async def agentic_chat(request: ChatRequest):
             import re
 
             # 提取用户补充的字段
-            followup_order = llm_service._extract_followup_slots(request.message, partial_order)
+            followup_order = active_llm._extract_followup_slots(request.message, partial_order)
 
             # 合并到 partial_order：只更新用户新提供的字段
             order = dict(partial_order)
@@ -290,7 +335,7 @@ async def agentic_chat(request: ChatRequest):
             llm_message = ""
         else:
             # 首次输入或无会话上下文：调用 LLM 解析
-            classification = llm_service.parse_agent_intent(
+            classification = active_llm.parse_agent_intent(
                 message=request.message,
                 session_id=request.session_id,
                 partial_order=partial_order,
@@ -319,14 +364,14 @@ async def agentic_chat(request: ChatRequest):
         def _save_session():
             """将当前解析状态保存到会话（用于多轮追问）"""
             nonlocal new_session_id, session
-            if new_session_id and new_session_id in llm_service.sessions:
-                session = llm_service.sessions[new_session_id]
+            if new_session_id and new_session_id in active_llm.sessions:
+                session = active_llm.sessions[new_session_id]
             else:
                 import uuid
                 new_session_id = str(uuid.uuid4())
                 from llm_service import ConversationSession
                 session = ConversationSession(session_id=new_session_id)
-                llm_service.sessions[new_session_id] = session
+                active_llm.sessions[new_session_id] = session
 
             session.current_state = "parsing"
             session.partial_data = {
@@ -342,8 +387,8 @@ async def agentic_chat(request: ChatRequest):
         def _clear_session():
             """信息完整后清理会话"""
             nonlocal new_session_id
-            if new_session_id and new_session_id in llm_service.sessions:
-                llm_service.sessions[new_session_id].current_state = "completed"
+            if new_session_id and new_session_id in active_llm.sessions:
+                active_llm.sessions[new_session_id].current_state = "completed"
 
         # ================================================================
         # 阶段 3: 根据意图和缺失字段路由
@@ -379,7 +424,7 @@ async def agentic_chat(request: ChatRequest):
                 "next_actions": [f"请提供{'、'.join(missing_cn)}"],
                 "response": message,
                 "tool_calls": [], "tool_results": [],
-                "model": llm_service.model, "configured": True,
+                "model": active_llm.model, "configured": True,
                 "session_id": new_session_id, "parse_source": parse_source
             }
 
@@ -406,7 +451,7 @@ async def agentic_chat(request: ChatRequest):
                     "next_actions": ["检查港口代码是否正确", "确认重量大于0"],
                     "response": "订单参数无效",
                     "tool_calls": [], "tool_results": [],
-                    "model": llm_service.model, "configured": True,
+                    "model": active_llm.model, "configured": True,
                     "session_id": new_session_id, "parse_source": parse_source
                 }
 
@@ -448,7 +493,7 @@ async def agentic_chat(request: ChatRequest):
                 fallback_data = result.fallback_transfer.model_dump() if result.fallback_transfer else None
 
                 # ---- LLM 反馈生成（阶段2） ----
-                fb = llm_service.generate_agent_feedback(
+                fb = active_llm.generate_agent_feedback(
                     user_message=request.message,
                     order=order,
                     recommendation=rec.model_dump() if rec else None,
@@ -494,7 +539,7 @@ async def agentic_chat(request: ChatRequest):
                     }}],
                     "tool_results": [{"success": True, "tool": "compare_freight",
                                     "total_plans": result.total_plans_found}],
-                    "model": llm_service.model, "configured": True,
+                    "model": active_llm.model, "configured": True,
                     "session_id": new_session_id, "parse_source": parse_source
                 }
 
@@ -519,7 +564,7 @@ async def agentic_chat(request: ChatRequest):
                     ]
 
                 # ---- LLM 反馈生成（阶段2） ----
-                fb = llm_service.generate_agent_feedback(
+                fb = active_llm.generate_agent_feedback(
                     user_message=request.message,
                     order=order,
                     recommendation=None,
@@ -549,7 +594,7 @@ async def agentic_chat(request: ChatRequest):
                     }}],
                     "tool_results": [{"success": True, "tool": "compare_freight",
                                     "total_plans": 0}],
-                    "model": llm_service.model, "configured": True,
+                    "model": active_llm.model, "configured": True,
                     "session_id": new_session_id, "parse_source": parse_source,
                     "feedback_source": fb["feedback_source"],
                     "feedback_reason": fb["feedback_reason"],
@@ -595,7 +640,7 @@ async def agentic_chat(request: ChatRequest):
                     "response": message,
                     "tool_calls": [{"tool": tool_name, "parameters": {}}],
                     "tool_results": [tool_result],
-                    "model": llm_service.model, "configured": True,
+                    "model": active_llm.model, "configured": True,
                     "session_id": new_session_id, "parse_source": parse_source
                 }
             else:
@@ -608,14 +653,14 @@ async def agentic_chat(request: ChatRequest):
                     "next_actions": ["重试查询"],
                     "response": "查询失败",
                     "tool_calls": [], "tool_results": [tool_result],
-                    "model": llm_service.model, "configured": True,
+                    "model": active_llm.model, "configured": True,
                     "session_id": new_session_id, "parse_source": parse_source
                 }
 
         # ---- 3d: explain_cost / export_report / compare_carriers → LLM工具调用 ----
         if intent in ("explain_cost", "export_report", "compare_carriers"):
             _clear_session()
-            llm_result = llm_service.chat_with_tools(request.message)
+            llm_result = active_llm.chat_with_tools(request.message)
             tool_calls = llm_result.get("tool_calls", [])
             tool_results = []
             if tool_calls and tool_manager:
@@ -636,13 +681,13 @@ async def agentic_chat(request: ChatRequest):
                 "next_actions": [],
                 "response": llm_result.get("response", ""),
                 "tool_calls": tool_calls, "tool_results": tool_results,
-                "model": llm_service.model, "configured": True,
+                "model": active_llm.model, "configured": True,
                 "session_id": llm_result.get("session_id"), "parse_source": parse_source
             }
 
         # ---- 3e: general 闲聊 → LLM 直接对话 ----
         _clear_session()
-        llm_result = llm_service.chat_with_tools(request.message)
+        llm_result = active_llm.chat_with_tools(request.message)
         tool_calls = llm_result.get("tool_calls", [])
         tool_results = []
         if tool_calls and tool_manager:
@@ -662,7 +707,7 @@ async def agentic_chat(request: ChatRequest):
             "next_actions": ["输入运输需求开始查询，例如：从大连运100kg到厦门"],
             "response": llm_result.get("response", ""),
             "tool_calls": tool_calls, "tool_results": tool_results,
-            "model": llm_service.model, "configured": True,
+            "model": active_llm.model, "configured": True,
             "session_id": llm_result.get("session_id"), "parse_source": parse_source
         }
 
@@ -676,8 +721,8 @@ async def agentic_chat(request: ChatRequest):
             "next_actions": ["重试请求", "检查输入格式"],
             "response": f"处理失败: {str(e)}",
             "tool_calls": [], "tool_results": [], "error": str(e),
-            "model": llm_service.model if llm_service else "none",
-            "configured": llm_service.is_configured() if llm_service else False,
+            "model": active_llm.model if active_llm else "none",
+            "configured": active_llm.is_configured() if active_llm else False,
             "session_id": None, "parse_source": "fallback"
         }
 
