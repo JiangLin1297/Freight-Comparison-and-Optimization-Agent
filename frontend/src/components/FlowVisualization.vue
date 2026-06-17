@@ -50,10 +50,18 @@ const stepInfo = computed(() => {
     if (activeStep.value <= props.step) {
       info.status = 'success'
       if (activeStep.value === 2 && props.result) {
-        info.description = `已找到 ${props.result.total_plans_found} 个方案`
+        const hasTransfer = props.result.transfer_routes && props.result.transfer_routes.length > 0
+        info.description = hasTransfer
+          ? `找到 ${props.result.transfer_routes.length} 条转运方案`
+          : `已找到 ${props.result.total_plans_found} 个方案`
       }
-      if (activeStep.value === 4 && props.result?.recommended_plan) {
-        info.description = `推荐 ${props.result.recommended_plan.plan.carrier}`
+      if (activeStep.value === 4) {
+        if (props.result?.recommended_plan) {
+          info.description = `推荐 ${props.result.recommended_plan.plan.carrier}`
+        } else if (props.result) {
+          info.description = '未找到可用方案'
+          info.status = 'wait'
+        }
       }
     }
     return info
