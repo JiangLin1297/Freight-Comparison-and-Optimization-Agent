@@ -66,8 +66,8 @@
                   <!-- 港口列表 -->
                   <div v-else-if="result.tool === 'get_ports'" class="ports-result">
                     <p><strong>可用港口：</strong></p>
-                    <p>起运港：{{ result.result.orig_ports?.join(', ') }}</p>
-                    <p>目的港：{{ result.result.dest_ports?.join(', ') }}</p>
+                    <p>起运港：{{ result.result.orig_ports?.map(p => getPortName(p)).join(', ') }}</p>
+                    <p>目的港：{{ result.result.dest_ports?.map(p => getPortName(p)).join(', ') }}</p>
                   </div>
                   <!-- 统计信息 -->
                   <div v-else-if="result.tool === 'get_statistics'" class="stats-result">
@@ -122,6 +122,7 @@
 import { ref, nextTick, watch } from 'vue'
 import axios from 'axios'
 import { ChatDotRound, Close, Loading } from '@element-plus/icons-vue'
+import { getPortName } from '../utils/portUtils.js'
 
 const props = defineProps({
   authHeaders: { type: Object, default: () => ({}) },

@@ -27,7 +27,12 @@
           placeholder="请选择起运港"
           style="width: 100%"
         >
-          <el-option v-for="port in ports.orig_ports" :key="port" :label="port" :value="port" />
+          <el-option
+            v-for="port in ports.orig_ports"
+            :key="port.code"
+            :label="port.name + ' (' + port.code + ')'"
+            :value="port.code"
+          />
         </el-select>
       </div>
       <div class="form-item">
@@ -38,7 +43,12 @@
           placeholder="请选择目的港"
           style="width: 100%"
         >
-          <el-option v-for="port in ports.dest_ports" :key="port" :label="port" :value="port" />
+          <el-option
+            v-for="port in ports.dest_ports"
+            :key="port.code"
+            :label="port.name + ' (' + port.code + ')'"
+            :value="port.code"
+          />
         </el-select>
       </div>
       <div class="form-item">

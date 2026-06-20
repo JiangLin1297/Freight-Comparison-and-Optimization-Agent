@@ -100,7 +100,7 @@
               未找到直达路线，已为您找到 {{ result.transfer_routes.length }} 条转运方案，请查看下方详情。
             </p>
             <p v-else-if="result">
-              当前查询条件（{{ result.order_info?.orig_port }} → {{ result.order_info?.dest_port }}，{{ result.order_info?.weight }}kg）未匹配到可用方案，请调整重量或港口后重试。
+              当前查询条件（{{ getPortName(result.order_info?.orig_port) }} → {{ getPortName(result.order_info?.dest_port) }}，{{ result.order_info?.weight }}kg）未匹配到可用方案，请调整重量或港口后重试。
             </p>
             <p v-else>输入自然语言需求或手动调整订单字段后，系统会匹配费率并给出推荐。</p>
           </div>
@@ -151,6 +151,7 @@ import NLInput from './components/NLInput.vue'
 import FlowVisualization from './components/FlowVisualization.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import HistoryPanel from './components/HistoryPanel.vue'
+import { getPortName } from './utils/portUtils.js'
 
 // ---- Agent 凭证管理 ----
 const AGENT_CREDENTIALS_KEY = 'agent_credentials'
@@ -258,7 +259,7 @@ const addHistoryItem = ({ userInput, replyType, message, order, result }) => {
 
   // 生成摘要
   if (order?.weight && order?.orig_port && order?.dest_port) {
-    const parts = [`${order.weight}kg`, order.orig_port, `→ ${order.dest_port}`]
+    const parts = [`${order.weight}kg`, getPortName(order.orig_port), `→ ${getPortName(order.dest_port)}`]
     if (order.max_days) parts.push(`${order.max_days}天内`)
     item.summary = parts.join(' ')
   } else if (userInput) {
