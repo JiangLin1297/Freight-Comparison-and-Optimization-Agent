@@ -79,6 +79,8 @@ class GraphRouter:
     def _build_adjacency(self, weight: float) -> Dict[str, List[str]]:
         """根据货物重量构建邻接表"""
         df = self.store.df
+        if df.empty or 'Min_Weight_Quant' not in df.columns:
+            return {}
         valid = df[(df['Min_Weight_Quant'] <= weight) &
                     (df['Max_Weight_Quant'] >= weight)]
         adj = {}

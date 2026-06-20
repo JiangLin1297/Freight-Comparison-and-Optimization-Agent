@@ -553,7 +553,9 @@ class FreightService:
             return Recommendation(plan=best_available, reason=reason, rank=1)
 
         if is_overweight and filtered_plans:
-            max_weight_plan = max(filtered_plans, key=lambda x: x.max_weight)
+            sorted_overweight = sorted(filtered_plans,
+                key=lambda x: (-x.max_weight, x.rate, x.transport_days))
+            max_weight_plan = sorted_overweight[0]
             max_weight_value = max_weight_plan.max_weight
             reason = f"因重量超标，请考虑是否分批运输。"
             reason += f"您的货物重量超过该路线所有承运商的最大承运范围（{max_weight_value}kg）。"
@@ -686,7 +688,8 @@ class FreightService:
             return cached_result
 
         plans = self.match_plans(order)
-        has_direct = any(p.is_exact_match for p in plans)
+        exact_plans = [p for p in plans if p.is_exact_match]
+        has_direct = len(exact_plans) > 0
 
         if order.weights:
             weights = order.weights
@@ -696,8 +699,6 @@ class FreightService:
             weights = ScoringWeights(cost_weight=0.5, time_weight=0.3, service_weight=0.2)
         else:
             weights = ScoringWeights(cost_weight=0.4, time_weight=0.3, service_weight=0.3)
-
-        exact_plans = [p for p in plans if p.is_exact_match]
         if exact_plans:
             for plan in exact_plans:
                 score, details = self.calculate_score(plan, exact_plans, weights)

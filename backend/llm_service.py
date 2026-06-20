@@ -422,12 +422,12 @@ class LLMService:
                 }
 
             except json.JSONDecodeError:
-                # 如果不是JSON格式，作为普通对话处理
+                logger.warning(f"LLM 返回非 JSON，无法解析工具调用: {content[:200]}")
                 session.messages.append({"role": "user", "content": user_message})
                 session.messages.append({"role": "assistant", "content": content})
 
                 return {
-                    "response": content,
+                    "response": "抱歉，AI 暂未理解您的请求，请重新描述一下。",
                     "tool_calls": [],
                     "configured": True,
                     "session_id": session.session_id
@@ -1066,7 +1066,32 @@ class LLMService:
                                 logger.warning(f"LLM返回JSON缺少intent字段: {json_str[:200]}")
                         else:
                             fallback_reason = "json_decode_error"
-                            logger.warning(f"LLM返回JSON解析失败: {json_str[:200]}")
+                            logger.warning(f"LLM返回JSON解析失败，重试一次: {json_str[:200]}")
+                            # retry: 用更严格的 prompt 再调一次
+                            try:
+                                retry_response = self.client.chat.completions.create(
+                                    model=self.model,
+                                    messages=[
+                                        {"role": "system", "content": system_prompt + "\n\n必须只返回JSON，不要任何其他文字。"},
+                                        {"role": "user", "content": message}
+                                    ],
+                                    temperature=0.1,
+                                    max_tokens=4000,
+                                    timeout=60,
+                                )
+                                retry_content = (retry_response.choices[0].message.content or "").strip()
+                                retry_json = self._extract_json(retry_content)
+                                if retry_json:
+                                    parsed = self._safe_parse_json(retry_json)
+                                    if parsed and isinstance(parsed, dict) and "intent" in parsed:
+                                        parse_source = "llm_retry"
+                                        fallback_reason = "none"
+                                    else:
+                                        logger.warning(f"LLM重试后JSON仍无效: {retry_json[:200]}")
+                                else:
+                                    logger.warning(f"LLM重试后仍无JSON: {retry_content[:200]}")
+                            except Exception:
+                                logger.warning("LLM重试调用也失败")
                     else:
                         fallback_reason = "no_json"
                         logger.warning(f"LLM返回内容中无JSON: {content[:200]}")
