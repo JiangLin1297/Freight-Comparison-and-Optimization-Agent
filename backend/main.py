@@ -793,6 +793,10 @@ async def agentic_chat(request: ChatRequest, req: Request):
                 route_str = f"{order['orig_port']} -> {order['dest_port']}"
                 has_time_filter = order.get("max_days") is not None
 
+                # 提取 fallback 转运数据（即使不满足时效，仍可能存在可用转运路线）
+                fallback_data = result.fallback_transfer.model_dump() if result.fallback_transfer else None
+                fallback_reason_str = result.fallback_reason or ""
+
                 if has_time_filter:
                     no_result_reason = f"在 {order['max_days']} 天时效内，{route_str} 路线无可用方案"
                     next_actions = [
@@ -822,6 +826,8 @@ async def agentic_chat(request: ChatRequest, req: Request):
                     parse_source=parse_source,
                     no_result_reason=no_result_reason,
                     next_actions=next_actions,
+                    transfer_routes=None,
+                    fallback_transfer=fallback_data,
                 )
 
                 return {
@@ -832,6 +838,9 @@ async def agentic_chat(request: ChatRequest, req: Request):
                     "order": order_info.model_dump() if order_info else None,
                     "recommendation": None, "plans": [],
                     "next_actions": next_actions,
+                    "transfer_routes": None,
+                    "fallback_transfer": fallback_data,
+                    "fallback_reason": fallback_reason_str,
                     "response": fb["message"],
                     "tool_calls": [{"tool": "compare_freight", "parameters": {
                         "weight": order["weight"], "orig_port": order["orig_port"],

@@ -481,6 +481,13 @@ const handleParse = async () => {
       nextActions.value = data.next_actions || []
       replyType.value = 'no_result'
 
+      emit('parsed', {
+        ...(data.order || {}),
+        transfer_routes: null,
+        fallback_transfer: data.fallback_transfer || null,
+        fallback_reason: data.fallback_reason || ''
+      })
+
       ElMessage.warning('未找到可用方案')
     } else {
       // general / 其他

@@ -108,10 +108,10 @@
 
         <FlowVisualization :step="flowStep" :result="result" :loading="loading" />
 
-        <ResultTable v-if="result && (result.recommended_plan || (result.transfer_routes && result.transfer_routes.length > 0))" :result="result" />
+        <ResultTable v-if="result && (result.recommended_plan || (result.transfer_routes && result.transfer_routes.length > 0) || result.fallback_transfer)" :result="result" />
 
         <ExportCard
-          v-if="result && (result.recommended_plan || (result.transfer_routes && result.transfer_routes.length > 0))"
+          v-if="result && (result.recommended_plan || (result.transfer_routes && result.transfer_routes.length > 0) || result.fallback_transfer)"
           :report="report"
           :exporting="exporting"
           :downloading-word="downloadingWord"
