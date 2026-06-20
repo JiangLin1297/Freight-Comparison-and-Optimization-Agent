@@ -64,7 +64,7 @@ class RoutingResult:
     direct_routes: List[TransferRoute] = field(default_factory=list)
     transfer_routes: List[TransferRoute] = field(default_factory=list)
     # 次优推荐 (所有路径都不可行时)
-    fallback_route: Optional[TransferRoute] = None
+    fallback_candidates: List[TransferRoute] = field(default_factory=list)
     fallback_reason: str = ""
 
 
@@ -229,15 +229,16 @@ class GraphRouter:
 
         # ── 5. 次优推荐 (所有可行路径都不满足条件) ──
         if not result.direct_routes and not result.transfer_routes:
-            # 找一个"最接近"的方案作为提示
-            fallback = self._find_best_effort(orig, dest, weight, adj)
-            if fallback:
-                result.fallback_route = fallback
+            # 收集所有候选，由上层评分排序选出最优
+            candidates = self._find_best_effort(orig, dest, weight, adj)
+            if candidates:
+                result.fallback_candidates = candidates
                 if max_days is not None:
+                    best = min(candidates, key=lambda r: r.total_estimated_days)
                     result.fallback_reason = (
                         f"在 {max_days} 天时效内没有可用方案。"
-                        f"最快可选方案需要 {fallback.total_estimated_days} 天"
-                        f"{' (含' + str(fallback.hop_count) + '次转运)' if fallback.hop_count > 0 else ''}。"
+                        f"最快可选方案需要 {best.total_estimated_days} 天"
+                        f"{' (含' + str(best.hop_count) + '次转运)' if best.hop_count > 0 else ''}。"
                         f"建议放宽时效要求。"
                     )
                 else:
@@ -248,23 +249,29 @@ class GraphRouter:
         return result
 
     def _find_best_effort(self, orig: str, dest: str, weight: float,
-                          adj: Dict[str, List[str]]) -> Optional[TransferRoute]:
+                          adj: Dict[str, List[str]]) -> List[TransferRoute]:
         """
         找到"最接近"的方案 (忽略时效约束):
-        1. 如果直达存在但超时 → 返回直达
-        2. 否则 BFS 最短路径 → 返回转运
-        3. 都没有 → None
+        搜索所有候选路径（含直达和转运），返回候选列表供外部评分排序。
         """
-        # 直达是否存在?
+        candidates = []
+
+        # 收集直达候选
         if dest in adj.get(orig, []):
-            return self._path_to_route([orig, dest], weight, max_days=None)
+            direct = self._path_to_route([orig, dest], weight, max_days=None)
+            if direct:
+                candidates.append(direct)
 
-        # BFS 找最短转运
-        path = self._bfs_shortest_path(orig, dest, adj)
-        if path and len(path) > 2:
-            return self._path_to_route(path, weight, max_days=None)
+        # DFS 搜索所有转运候选
+        all_paths = self._find_all_paths(orig, dest, adj)
+        for path in all_paths:
+            if len(path) <= 2:
+                continue  # 跳过直达（已收集）
+            route = self._path_to_route(path, weight, max_days=None)
+            if route:
+                candidates.append(route)
 
-        return None
+        return candidates
 
     def _find_all_paths(self, orig: str, dest: str,
                         adj: Dict[str, List[str]]) -> List[List[str]]:
