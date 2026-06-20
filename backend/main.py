@@ -77,7 +77,13 @@ def _init_data_source():
         logger.info(f"数据源: CSV ({csv_path})")
     except Exception as e:
         logger.error(f"CSV 初始化也失败: {e}")
-        raise
+        data_store = None
+        freight_service = None
+        active_data_source = "none"
+        print("=" * 60)
+        print("  系统已启动，但尚未加载数据。")
+        print("  请通过前端页面上传 Excel / CSV 文件建立数据库。")
+        print("=" * 60)
 
 
 # 初始化数据源
@@ -182,12 +188,18 @@ async def root():
 @app.get("/api/ports")
 async def get_ports():
     """获取可用港口列表"""
+    if freight_service is None:
+        return {"orig_ports": [], "dest_ports": []}
     return freight_service.get_available_ports()
 
 
 @app.get("/api/statistics")
 async def get_statistics():
     """获取数据统计信息"""
+    if freight_service is None:
+        return {"total_records": 0, "carriers": [], "orig_ports": [],
+                "dest_ports": [], "transport_modes": [], "service_levels": [],
+                "has_service_rating": False, "data_source": "none"}
     stats = freight_service.get_statistics()
     stats["data_source"] = active_data_source
     return stats
@@ -196,6 +208,8 @@ async def get_statistics():
 @app.get("/api/cache_stats")
 async def get_cache_stats():
     """获取缓存统计信息"""
+    if freight_service is None:
+        return {"cache_size": 0, "cache_hits": 0, "cache_misses": 0, "hit_rate": "0.0%"}
     return freight_service.get_cache_stats()
 
 
@@ -285,9 +299,10 @@ async def upload_data(file: UploadFile = File(...)):
             session.close()
 
         # 刷新 freight_service 的缓存和评分检测
-        if hasattr(freight_service.data_store, 'refresh_service_rating'):
-            freight_service.data_store.refresh_service_rating()
-        freight_service.clear_compare_cache()
+        if freight_service is not None:
+            if hasattr(freight_service.data_store, 'refresh_service_rating'):
+                freight_service.data_store.refresh_service_rating()
+            freight_service.clear_compare_cache()
 
         # 重新创建数据源实例以刷新内存状态
         from database import get_session_factory
@@ -317,6 +332,8 @@ async def upload_data(file: UploadFile = File(...)):
 @app.get("/api/data_preview")
 async def data_preview(page: int = 1, page_size: int = 50):
     """分页浏览运价数据（只读），CSV/SQLite 双模式兼容"""
+    if freight_service is None:
+        return {"total": 0, "page": 1, "page_size": page_size, "columns": [], "rows": []}
     columns = [
         'id', 'carrier', 'orig_port', 'dest_port',
         'min_weight', 'max_weight', 'service_level',
@@ -386,6 +403,8 @@ async def data_preview(page: int = 1, page_size: int = 50):
 @app.post("/api/compare", response_model=ComparisonResult)
 async def compare_freight(order: OrderRequest):
     """执行运费比价"""
+    if freight_service is None:
+        raise HTTPException(status_code=503, detail="数据源未就绪，请先上传数据文件")
     try:
         result = freight_service.compare(order)
         return result
@@ -977,6 +996,8 @@ async def get_session_status(session_id: str):
 @app.post("/api/export")
 async def export_report(order: DocxExportRequest):
     """导出比价报告"""
+    if freight_service is None:
+        raise HTTPException(status_code=503, detail="数据源未就绪，请先上传数据文件")
     try:
         result = freight_service.compare(order)
         report = generate_report(result, feedback=order.feedback, use_ai=order.use_ai)
@@ -1074,9 +1095,10 @@ async def reload_datasource():
             _init_data_source()
 
         # 清除缓存
-        if hasattr(data_store, 'clear_cache'):
+        if data_store is not None and hasattr(data_store, 'clear_cache'):
             data_store.clear_cache()
-        freight_service.clear_compare_cache()
+        if freight_service is not None:
+            freight_service.clear_compare_cache()
 
         return {"success": True, "data_source": active_data_source, "message": "数据源已重新加载"}
     except Exception as e:
@@ -1401,6 +1423,8 @@ def generate_history_docx(items: list) -> bytes:
 @app.post("/api/export_docx")
 async def export_docx(order: DocxExportRequest):
     """导出比价报告 Word 文档"""
+    if freight_service is None:
+        raise HTTPException(status_code=503, detail="数据源未就绪，请先上传数据文件")
     from fastapi.responses import Response
     from urllib.parse import quote
     try:
