@@ -756,8 +756,13 @@ class FreightService:
                     )
                     recommendation = Recommendation(plan=rec_plan, reason=reason, rank=1)
 
-            if not transfer_routes and routing_result.fallback_route:
-                fb = routing_result.fallback_route
+            if not transfer_routes and routing_result.fallback_candidates:
+                candidates = routing_result.fallback_candidates
+                # 对候选评分排序，取最高分
+                for c in candidates:
+                    self._score_transfer_route(c, candidates, weights)
+                candidates.sort(key=lambda r: r.score or 0, reverse=True)
+                fb = candidates[0]
                 fallback_transfer = self._build_single_transfer_plan(fb, router)
                 if order.max_days is not None and fb.is_direct:
                     fallback_reason = (
