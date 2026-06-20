@@ -963,12 +963,35 @@ async def export_report(order: DocxExportRequest):
 
 
 @app.get("/api/status")
-async def get_status():
-    """获取系统状态"""
+async def get_status(req: Request):
+    """获取系统状态（支持检查用户自定义凭证）"""
+    # 检查用户自定义凭证
+    user_key = req.headers.get("X-API-Key")
+    user_url = req.headers.get("X-Base-URL")
+    user_model = req.headers.get("X-Model")
+
+    if user_key and user_url:
+        # 用户有自定义凭证，检查其有效性
+        from llm_service import LLMService
+        user_llm = LLMService(
+            tool_manager=None,
+            api_key=user_key,
+            base_url=user_url,
+            model=user_model or "mimo-v2.5-pro",
+        )
+        return {
+            "data_source": active_data_source,
+            "llm_configured": user_llm.is_configured(),
+            "llm_model": user_llm.model,
+            "has_custom_agent": True,
+        }
+
+    # 使用全局配置
     return {
         "data_source": active_data_source,
         "llm_configured": llm_service.is_configured() if llm_service else False,
         "llm_model": llm_service.model if llm_service else "none",
+        "has_custom_agent": False,
     }
 
 

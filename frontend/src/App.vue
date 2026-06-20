@@ -5,6 +5,8 @@
       :custom-model="userCredentials.model"
       :custom-label="userCredentials.label"
       :custom-subtitle="userCredentials.subtitle"
+      :auth-headers="authHeaders"
+      :is-processing="isProcessing"
       @open-settings="settingsVisible = true"
       @update:connection-status="handleConnectionStatus"
     />
@@ -25,6 +27,7 @@
         <NLInput
           @parsed="handleNLParsed"
           @agent-update="handleAgentUpdate"
+          @processing="handleProcessingChange"
           :auth-headers="authHeaders"
           :connection-status="connectionStatus"
         />
@@ -159,9 +162,14 @@ const connectionStatus = ref({
   llm: false,
   error: ''
 })
+const isProcessing = ref(false) // 是否正在处理 LLM 请求
 
 const handleConnectionStatus = (status) => {
   connectionStatus.value = status
+}
+
+const handleProcessingChange = (processing) => {
+  isProcessing.value = processing
 }
 
 const loadCredentials = () => {

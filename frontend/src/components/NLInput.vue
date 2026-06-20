@@ -164,7 +164,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['parsed', 'agent-update'])
+const emit = defineEmits(['parsed', 'agent-update', 'processing'])
 
 const inputText = ref('')
 const parsing = ref(false)
@@ -331,6 +331,7 @@ const handleParse = async () => {
   progressStage.value = 0
   isOfflineMode.value = false
   offlineMessage.value = ''
+  emit('processing', true) // 通知父组件开始处理
 
   const userMsg = inputText.value.trim()
   emit('agent-update', {
@@ -512,6 +513,7 @@ const handleParse = async () => {
     }
     parsing.value = false
     inputText.value = ''
+    emit('processing', false) // 通知父组件处理完成
   }
 }
 

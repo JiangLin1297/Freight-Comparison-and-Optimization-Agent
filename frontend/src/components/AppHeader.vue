@@ -38,6 +38,8 @@ const props = defineProps({
   customModel: { type: String, default: '' },
   customLabel: { type: String, default: '' },
   customSubtitle: { type: String, default: '' },
+  authHeaders: { type: Object, default: () => ({}) },
+  isProcessing: { type: Boolean, default: false }, // 是否正在处理请求
 })
 
 const emit = defineEmits(['open-settings', 'update:connection-status'])
@@ -88,7 +90,8 @@ const checkStatus = async () => {
     const timeoutId = setTimeout(() => controller.abort(), 5000) // 5秒超时
 
     const res = await fetch('/api/status', {
-      signal: controller.signal
+      signal: controller.signal,
+      headers: props.authHeaders
     })
     clearTimeout(timeoutId)
 
@@ -97,12 +100,15 @@ const checkStatus = async () => {
     serverModel.value = data.llm_model || ''
     connectionError.value = ''
   } catch (err) {
-    llmConnected.value = false
-    serverModel.value = ''
-    if (err.name === 'AbortError') {
-      connectionError.value = '连接超时'
-    } else {
-      connectionError.value = '无法连接到服务器'
+    // 如果正在处理请求，不要将状态更新为断开连接
+    if (!props.isProcessing) {
+      llmConnected.value = false
+      serverModel.value = ''
+      if (err.name === 'AbortError') {
+        connectionError.value = '连接超时'
+      } else {
+        connectionError.value = '无法连接到服务器'
+      }
     }
   }
 
