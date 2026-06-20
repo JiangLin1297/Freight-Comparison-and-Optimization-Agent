@@ -79,8 +79,12 @@
         style="width: 100%"
       >
         <el-table-column prop="carrier" label="承运商" width="90" fixed />
-        <el-table-column prop="orig_port" label="起运港" width="80" />
-        <el-table-column prop="dest_port" label="目的港" width="80" />
+        <el-table-column prop="orig_port" label="起运港" width="80">
+          <template #default="{ row }">{{ getPortName(row.orig_port) }}</template>
+        </el-table-column>
+        <el-table-column prop="dest_port" label="目的港" width="80">
+          <template #default="{ row }">{{ getPortName(row.dest_port) }}</template>
+        </el-table-column>
         <el-table-column prop="min_weight" label="最小重量" width="90" />
         <el-table-column prop="max_weight" label="最大重量" width="90" />
         <el-table-column prop="service_level" label="服务级别" width="80" />
@@ -119,6 +123,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { getPortName } from '../utils/portUtils.js'
 
 const props = defineProps({
   statistics: { type: Object, default: () => ({}) },

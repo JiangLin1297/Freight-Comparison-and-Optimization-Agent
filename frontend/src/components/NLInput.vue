@@ -115,11 +115,11 @@
         </div>
         <div class="preview-item" :class="{ 'missing': !parsedData.orig_port }">
           <span class="label">起运港</span>
-          <span class="value">{{ parsedData.orig_port || '待补充' }}</span>
+          <span class="value">{{ getPortName(parsedData.orig_port) || '待补充' }}</span>
         </div>
         <div class="preview-item" :class="{ 'missing': !parsedData.dest_port }">
           <span class="label">目的港</span>
-          <span class="value">{{ parsedData.dest_port || '待补充' }}</span>
+          <span class="value">{{ getPortName(parsedData.dest_port) || '待补充' }}</span>
         </div>
         <div class="preview-item" :class="{ 'missing': !parsedData.max_days }">
           <span class="label">最大天数</span>
@@ -155,6 +155,7 @@
 import { ref, computed, watch } from 'vue'
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { getPortName } from '../utils/portUtils.js'
 
 const props = defineProps({
   authHeaders: { type: Object, default: () => ({}) },
@@ -397,7 +398,7 @@ const handleParse = async () => {
       parsedData.value = offlineResult
       missingFields.value = []
       replyType.value = 'recommendation'
-      agentMessage.value = `已识别：${offlineResult.weight}kg，${offlineResult.orig_port} → ${offlineResult.dest_port}`
+      agentMessage.value = `已识别：${offlineResult.weight}kg，${getPortName(offlineResult.orig_port)} → ${getPortName(offlineResult.dest_port)}`
       nextActions.value = []
 
       if (offlineResult.priority === 'time') {

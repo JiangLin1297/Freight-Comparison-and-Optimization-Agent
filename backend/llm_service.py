@@ -441,31 +441,31 @@ class LLMService:
                 "error": str(e)
             }
 
-    def _is_simple_input(self, text: str) -> bool:
-        """
-        检测是否为简单输入（PORT代码+数字格式）
-        简单输入可直接用正则解析，无需调用LLM，响应时间从~7s降至<50ms
-        """
-        # 简单输入模式：包含PORT代码和数字重量（支持一位或两位数字）
-        simple_pattern = re.compile(
-            r'PORT\s*\d{1,2}.*?\d+\s*(?:kg|公斤|千克|吨|斤)'  # PORT代码 + 重量
-            r'|'
-            r'\d+\s*(?:kg|公斤|千克|吨|斤).*?PORT\s*\d{1,2}',  # 重量 + PORT代码
-            re.IGNORECASE
-        )
-        return bool(simple_pattern.search(text))
-
     def parse_order(self, text: str, session_id: str = None) -> Dict[str, Any]:
         """将自然语言描述解析为结构化订单数据，支持CoT思维链和多轮对话"""
-        # 快速路径：简单输入直接用正则解析，避免LLM调用开销
-        if self._is_simple_input(text):
-            result = self._enhanced_regex_parse(text)
-            result["parse_method"] = "regex_fast"
-            return result
+        # 快速路径：先用正则解析（<50ms），如果三个必要字段都完整则直接返回
+        regex_result = self._fallback_parse(text)
+        required_fields = ["weight", "orig_port", "dest_port"]
+        if all(regex_result.get(f) for f in required_fields):
+            # 正则解析完整，直接返回（避免LLM调用开销~7s）
+            regex_result["analysis"] = "正则解析完整，使用快速路径"
+            regex_result["confidence"] = "high"
+            regex_result["missing_fields"] = []
+            regex_result["guidance"] = ""
+            regex_result["session_id"] = None
+            regex_result["parse_method"] = "regex_fast"
+            return regex_result
 
+        # 正则解析不完整，需要LLM补充
         if not self.client:
-            # 无API key时使用简单的正则解析
-            return self._fallback_parse(text)
+            # 无API key时返回不完整的正则结果
+            regex_result["analysis"] = "正则解析不完整，无LLM可用"
+            regex_result["confidence"] = "low"
+            regex_result["missing_fields"] = [f for f in required_fields if not regex_result.get(f)]
+            regex_result["guidance"] = "请补充缺失信息"
+            regex_result["session_id"] = None
+            regex_result["parse_method"] = "regex_fallback"
+            return regex_result
 
         # CoT思维链系统提示词
         system_prompt = """你是一个物流订单信息提取助手。请严格按照以下三个步骤进行分析：
@@ -1003,12 +1003,42 @@ class LLMService:
         """
         LLM 主导的意图解析 + 订单信息提取。
 
-        策略：优先调 LLM → 失败时 fallback 到 classify_intent
+        策略：快速路径 → LLM → fallback 到 classify_intent
         所有路径都经过 _merge_and_finalize 进行 partial_order 合并
 
         MiMo v2.5 是推理模型，reasoning_tokens 消耗 ~500-1500 token，
         因此 max_tokens 设为 4000 确保有足够空间输出 content。
         """
+        # ---- 快速路径：正则解析（<50ms）----
+        # 如果正则能完整解析出三个必要字段，直接返回，避免 LLM 调用开销（~7s）
+        regex_result = self._fallback_parse(message)
+        required_fields = ["weight", "orig_port", "dest_port"]
+        if all(regex_result.get(f) for f in required_fields):
+            # 正则解析完整，构建返回结果
+            # 港口规范化
+            regex_result["orig_port"] = self._normalize_port(regex_result["orig_port"])
+            regex_result["dest_port"] = self._normalize_port(regex_result["dest_port"])
+            # 方向修正
+            regex_result["orig_port"], regex_result["dest_port"] = self._fix_direction(
+                regex_result["orig_port"], regex_result["dest_port"], message
+            )
+            result = {
+                "intent": "compare_freight",
+                "order": regex_result,
+                "missing_fields": [],
+                "confidence": "high",
+                "guidance": None,
+                "parse_source": "regex_fast",
+                "fallback_reason": "none",
+                "message": ""
+            }
+            # 多轮合并（如果有 partial_order）
+            if partial_order:
+                for field in ("weight", "orig_port", "dest_port", "max_days", "priority"):
+                    if regex_result.get(field) is None and partial_order.get(field) is not None:
+                        regex_result[field] = partial_order[field]
+            return result
+
         parsed = None
         parse_source = "fallback"
         fallback_reason = "none"

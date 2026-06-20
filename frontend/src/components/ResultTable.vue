@@ -103,7 +103,7 @@
         <div class="transfer-path">
           <span v-for="(p, j) in tr.path" :key="j">
             <el-tag size="small" :type="j === 0 ? '' : j === tr.path.length - 1 ? 'success' : 'warning'">
-              {{ p }}
+              {{ getPortName(p) }}
             </el-tag>
             <span v-if="j < tr.path.length - 1" class="path-arrow">→</span>
           </span>
@@ -117,7 +117,7 @@
         <div class="transfer-legs">
           <div v-for="(leg, k) in tr.legs" :key="'leg-' + k" class="leg-row">
             <span class="leg-label">第{{ k + 1 }}段</span>
-            <span>{{ leg.from_port }} → {{ leg.to_port }}</span>
+            <span>{{ getPortName(leg.from_port) }} → {{ getPortName(leg.to_port) }}</span>
             <el-tag :type="leg.mode === 'AIR' ? 'primary' : 'success'" size="small" effect="plain">
               {{ leg.mode === 'AIR' ? '空运' : '陆运' }}
             </el-tag>
@@ -139,7 +139,7 @@
       <div class="transfer-card fallback-card">
         <div class="transfer-path">
           <span v-for="(p, j) in result.fallback_transfer.path" :key="j">
-            <el-tag size="small">{{ p }}</el-tag>
+            <el-tag size="small">{{ getPortName(p) }}</el-tag>
             <span v-if="j < result.fallback_transfer.path.length - 1" class="path-arrow">→</span>
           </span>
         </div>
@@ -154,6 +154,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { getPortName } from '../utils/portUtils.js'
 
 const props = defineProps({
   result: { type: Object, required: true }

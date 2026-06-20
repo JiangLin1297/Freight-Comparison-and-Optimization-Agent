@@ -95,6 +95,7 @@
 import { ref, watch, nextTick, onMounted } from 'vue'
 import { Clock } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
+import { getPortName } from '../utils/portUtils.js'
 
 const STORAGE_KEY = 'freight_history_items'
 const MAX_ITEMS = 50
@@ -195,8 +196,8 @@ const formatOrder = (order) => {
   if (!order) return ''
   const parts = []
   if (order.weight) parts.push(`${order.weight}kg`)
-  if (order.orig_port) parts.push(order.orig_port)
-  if (order.dest_port) parts.push(`→ ${order.dest_port}`)
+  if (order.orig_port) parts.push(getPortName(order.orig_port))
+  if (order.dest_port) parts.push(`→ ${getPortName(order.dest_port)}`)
   if (order.max_days) parts.push(`${order.max_days}天内`)
   return parts.join('，') || '-'
 }

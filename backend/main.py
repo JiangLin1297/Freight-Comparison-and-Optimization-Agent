@@ -14,6 +14,24 @@ logger = logging.getLogger(__name__)
 import config
 from models import OrderRequest, ComparisonResult
 
+# 港口代码 -> 中文名映射（用于报告生成）
+_port_code_to_name = None
+
+def get_port_name(code):
+    """将港口代码转换为中文名"""
+    global _port_code_to_name
+    if not code:
+        return code
+    # 延迟构建反向映射（代码->名称）
+    if _port_code_to_name is None:
+        from llm_service import PORT_NAME_MAP
+        # 反向映射：取每个代码对应的最短名称（通常是中文名）
+        _port_code_to_name = {}
+        for name, c in PORT_NAME_MAP.items():
+            if c not in _port_code_to_name or len(name) < len(_port_code_to_name[c]):
+                _port_code_to_name[c] = name
+    return _port_code_to_name.get(code, code)
+
 
 class DocxExportRequest(OrderRequest):
     feedback: Optional[str] = None
@@ -187,10 +205,29 @@ async def root():
 
 @app.get("/api/ports")
 async def get_ports():
-    """获取可用港口列表"""
+    """获取可用港口列表（包含港口名称）"""
     if freight_service is None:
         return {"orig_ports": [], "dest_ports": []}
-    return freight_service.get_available_ports()
+    from llm_service import PORT_NAME_MAP
+    ports = freight_service.get_available_ports()
+
+    # 构建反向映射：PORT代码 -> 中文名（取最短的名称，通常是中文）
+    code_to_name = {}
+    for name, code in PORT_NAME_MAP.items():
+        if code not in code_to_name or len(name) < len(code_to_name[code]):
+            code_to_name[code] = name
+
+    # 返回包含名称的港口列表
+    return {
+        "orig_ports": [
+            {"code": p, "name": code_to_name.get(p, p)}
+            for p in ports["orig_ports"]
+        ],
+        "dest_ports": [
+            {"code": p, "name": code_to_name.get(p, p)}
+            for p in ports["dest_ports"]
+        ]
+    }
 
 
 @app.get("/api/statistics")
@@ -700,20 +737,33 @@ async def agentic_chat(request: ChatRequest, req: Request):
                 fallback_data = result.fallback_transfer.model_dump() if result.fallback_transfer else None
 
                 # ---- LLM 反馈生成（阶段2） ----
-                fb = active_llm.generate_agent_feedback(
-                    user_message=request.message,
-                    order=order,
-                    recommendation=rec.model_dump() if rec else None,
-                    plans=plans_data,
-                    total_plans_found=result.total_plans_found,
-                    scoring_weights=result.scoring_weights,
-                    reply_type="recommendation" if rec else "general",
-                    intent=intent,
-                    parse_source=parse_source,
-                    next_actions=[],
-                    transfer_routes=transfer_data,
-                    fallback_transfer=fallback_data,
-                )
+                # 快速路径解析时，直接用模板反馈（避免调 LLM 拖慢速度）
+                if parse_source == "regex_fast":
+                    fb = {
+                        "message": active_llm._build_template_feedback(
+                            "recommendation" if rec else "general",
+                            order, rec.model_dump() if rec else None,
+                            plans_data, result.total_plans_found,
+                            result.scoring_weights, None, []
+                        ),
+                        "feedback_source": "template",
+                        "feedback_reason": "regex_fast_path",
+                    }
+                else:
+                    fb = active_llm.generate_agent_feedback(
+                        user_message=request.message,
+                        order=order,
+                        recommendation=rec.model_dump() if rec else None,
+                        plans=plans_data,
+                        total_plans_found=result.total_plans_found,
+                        scoring_weights=result.scoring_weights,
+                        reply_type="recommendation" if rec else "general",
+                        intent=intent,
+                        parse_source=parse_source,
+                        next_actions=[],
+                        transfer_routes=transfer_data,
+                        fallback_transfer=fallback_data,
+                    )
                 message = fb["message"]
                 feedback_source = fb["feedback_source"]
                 feedback_reason = fb["feedback_reason"]
@@ -771,14 +821,24 @@ async def agentic_chat(request: ChatRequest, req: Request):
                     ]
 
                 # ---- LLM 反馈生成（阶段2） ----
-                fb = active_llm.generate_agent_feedback(
-                    user_message=request.message,
-                    order=order,
-                    recommendation=None,
-                    plans=[],
-                    total_plans_found=0,
-                    scoring_weights=None,
-                    reply_type="no_result",
+                # 快速路径解析时，反馈也用模板（避免调 LLM 拖慢速度）
+                if parse_source == "regex_fast":
+                    fb = {
+                        "message": active_llm._build_template_feedback(
+                            "no_result", order, None, [], 0, None, no_result_reason, next_actions
+                        ),
+                        "feedback_source": "template",
+                        "feedback_reason": "regex_fast_path",
+                    }
+                else:
+                    fb = active_llm.generate_agent_feedback(
+                        user_message=request.message,
+                        order=order,
+                        recommendation=None,
+                        plans=[],
+                        total_plans_found=0,
+                        scoring_weights=None,
+                        reply_type="no_result",
                     intent=intent,
                     parse_source=parse_source,
                     no_result_reason=no_result_reason,
@@ -1121,8 +1181,8 @@ def generate_report(result: ComparisonResult, feedback: str = None, use_ai: bool
 
     lines.append("")
     lines.append("【订单信息】")
-    lines.append(f"  起运港: {result.order_info.orig_port}")
-    lines.append(f"  目的港: {result.order_info.dest_port}")
+    lines.append(f"  起运港: {get_port_name(result.order_info.orig_port)}")
+    lines.append(f"  目的港: {get_port_name(result.order_info.dest_port)}")
     lines.append(f"  货物重量: {result.order_info.weight} kg")
     if result.order_info.max_days:
         lines.append(f"  时效要求: ≤{result.order_info.max_days}天")
@@ -1158,16 +1218,18 @@ def generate_report(result: ComparisonResult, feedback: str = None, use_ai: bool
     elif result.transfer_routes:
         lines.append("【转运方案】(未找到直达路线)")
         for i, tr in enumerate(result.transfer_routes):
-            lines.append(f"  转运{i+1}: {' → '.join(tr.path)}")
+            path_names = [get_port_name(p) for p in tr.path]
+            lines.append(f"  转运{i+1}: {' → '.join(path_names)}")
             lines.append(f"    总成本: ${tr.total_cost:.2f} | 总耗时: {tr.total_estimated_days}天 | 经{tr.hop_count}次中转")
             for j, leg in enumerate(tr.legs):
                 mode_cn = "空运" if leg.mode == "AIR" else "陆运"
                 svc_cn = "门到门" if leg.service_level == "DTD" else "门到港"
-                lines.append(f"    第{j+1}段 {leg.from_port}→{leg.to_port}: {leg.carrier} {mode_cn}({svc_cn}) ${leg.total_cost:.2f} / {leg.transport_days}天")
+                lines.append(f"    第{j+1}段 {get_port_name(leg.from_port)}→{get_port_name(leg.to_port)}: {leg.carrier} {mode_cn}({svc_cn}) ${leg.total_cost:.2f} / {leg.transport_days}天")
     elif result.fallback_transfer:
         lines.append("【次优推荐】")
         fb = result.fallback_transfer
-        lines.append(f"  路径: {' → '.join(fb.path)}")
+        path_names = [get_port_name(p) for p in fb.path]
+        lines.append(f"  路径: {' → '.join(path_names)}")
         lines.append(f"  总成本: ${fb.total_cost:.2f} | 总耗时: {fb.total_estimated_days}天")
         lines.append(f"  说明: {result.fallback_reason}")
     else:
@@ -1214,8 +1276,8 @@ def generate_docx(result: ComparisonResult, feedback: str = None, use_ai: bool =
     cells[1].text = '内容'
 
     order_rows = [
-        ('起运港', result.order_info.orig_port),
-        ('目的港', result.order_info.dest_port),
+        ('起运港', get_port_name(result.order_info.orig_port)),
+        ('目的港', get_port_name(result.order_info.dest_port)),
         ('货物重量', f'{result.order_info.weight} kg'),
     ]
     if result.order_info.max_days:
@@ -1280,7 +1342,8 @@ def generate_docx(result: ComparisonResult, feedback: str = None, use_ai: bool =
     elif result.transfer_routes:
         doc.add_heading('转运方案（未找到直达路线）', level=1)
         for i, tr in enumerate(result.transfer_routes):
-            doc.add_heading(f'转运路线 {i+1}: {" → ".join(tr.path)}', level=2)
+            path_names = [get_port_name(p) for p in tr.path]
+            doc.add_heading(f'转运路线 {i+1}: {" → ".join(path_names)}', level=2)
             tr_meta = doc.add_table(rows=3, cols=2)
             tr_meta.style = 'Light Grid Accent 1'
             tr_meta.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -1305,7 +1368,7 @@ def generate_docx(result: ComparisonResult, feedback: str = None, use_ai: bool =
             for j, leg in enumerate(tr.legs):
                 row = leg_table.add_row()
                 row.cells[0].text = f'第{j+1}段'
-                row.cells[1].text = f'{leg.from_port} → {leg.to_port}'
+                row.cells[1].text = f'{get_port_name(leg.from_port)} → {get_port_name(leg.to_port)}'
                 row.cells[2].text = leg.carrier
                 row.cells[3].text = '空运' if leg.mode == 'AIR' else '陆运'
                 row.cells[4].text = '门到门' if leg.service_level == 'DTD' else '门到港'
@@ -1322,7 +1385,7 @@ def generate_docx(result: ComparisonResult, feedback: str = None, use_ai: bool =
         fb_table.style = 'Light Grid Accent 1'
         fb_table.alignment = WD_TABLE_ALIGNMENT.CENTER
         fb_fields = [
-            ('路径', ' → '.join(fb.path)),
+            ('路径', ' → '.join([get_port_name(p) for p in fb.path])),
             ('总成本', f'${fb.total_cost:.2f}'),
             ('总耗时', f'{fb.total_estimated_days} 天'),
         ]
