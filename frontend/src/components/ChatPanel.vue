@@ -11,8 +11,6 @@
       <div class="chat-header">
         <span>AI物流助手</span>
         <div class="header-actions">
-          <el-tag v-if="useAgentic" type="success" size="small" effect="dark">Agent模式</el-tag>
-          <el-tag v-else type="info" size="small">普通模式</el-tag>
           <el-icon @click="isOpen = false" class="close-btn"><Close /></el-icon>
         </div>
       </div>
@@ -27,13 +25,6 @@
               <li>分析最优运输方案</li>
               <li>解释运费计算规则</li>
             </ul>
-            <el-switch
-              v-model="useAgentic"
-              size="small"
-              active-text="Agent模式"
-              inactive-text="普通模式"
-              style="margin-top: 8px;"
-            />
           </div>
         </div>
         <div
@@ -43,7 +34,7 @@
           :class="msg.role"
         >
           <div class="message-content">
-            <div v-if="msg.content">{{ msg.content }}</div>
+            <div v-if="msg.content" v-html="formatMessage(msg.content)"></div>
             <!-- 工具调用结果展示 -->
             <div v-if="msg.tool_results && msg.tool_results.length > 0" class="tool-results">
               <el-divider content-position="left">查询结果</el-divider>
@@ -106,7 +97,7 @@
       <div class="chat-input">
         <el-input
           v-model="inputMsg"
-          :placeholder="useAgentic ? '输入查询需求，如：从大连运100kg到厦门' : '输入消息...'"
+          placeholder="输入查询需求，如：从大连运100kg到厦门"
           @keyup.enter="handleSend"
           :disabled="sending"
         />
@@ -133,7 +124,13 @@ const inputMsg = ref('')
 const messages = ref([])
 const sending = ref(false)
 const messagesRef = ref(null)
-const useAgentic = ref(true)  // 默认使用Agent模式
+
+function formatMessage(text) {
+  if (!text) return ''
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\n\n/g, '<br/><br/>')
+}
 
 const scrollToBottom = () => {
   nextTick(() => {
@@ -154,14 +151,51 @@ const handleSend = async () => {
   sending.value = true
 
   try {
-    const endpoint = useAgentic.value ? '/api/agentic_chat' : '/api/chat'
-    const { data } = await axios.post(endpoint, { message: userMsg }, { headers: props.authHeaders })
+    const { data } = await axios.post('/api/agentic_chat', { message: userMsg }, { headers: props.authHeaders })
+
+    const toolResults = []
+    // compare_freight → 比价推荐
+    if (data.recommendation || data.plans?.length > 0) {
+      toolResults.push({
+        success: true,
+        tool: 'compare_freight',
+        result: {
+          total_plans: data.plans?.length || 0,
+          recommendation: data.recommendation || null
+        }
+      })
+    }
+    // get_ports → 从 message 提取港口信息用于展示
+    if (data.intent === 'get_ports' && data.tool_results?.length > 0) {
+      const portsResult = data.tool_results.find(t => t.tool === 'get_ports')
+      if (portsResult?.success) {
+        toolResults.push({ ...portsResult, tool: 'get_ports' })
+      }
+    }
+    // get_statistics → 同
+    if (data.intent === 'get_statistics' && data.tool_results?.length > 0) {
+      const statsResult = data.tool_results.find(t => t.tool === 'get_statistics')
+      if (statsResult?.success) {
+        toolResults.push({ ...statsResult, tool: 'get_statistics' })
+      }
+    }
+    // explain_cost → 同
+    if (data.tool_results?.length > 0) {
+      const explainResult = data.tool_results.find(t => t.tool === 'explain_cost')
+      if (explainResult?.success) {
+        toolResults.push({ ...explainResult, tool: 'explain_cost' })
+      }
+    }
+    // 如果 tool_results 已有其他工具结果但未被上述处理，兜底传入
+    if (toolResults.length === 0 && data.tool_results?.length > 0) {
+      toolResults.push(...data.tool_results)
+    }
 
     const assistantMsg = {
       role: 'assistant',
-      content: data.response || '抱歉，暂时无法回答',
+      content: data.response || data.message || '抱歉，暂时无法回答',
       tool_calls: data.tool_calls || [],
-      tool_results: data.tool_results || []
+      tool_results: toolResults
     }
     messages.value.push(assistantMsg)
   } catch (err) {

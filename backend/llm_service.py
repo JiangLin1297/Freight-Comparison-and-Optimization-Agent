@@ -734,10 +734,6 @@ class LLMService:
             if not result.get("dest_port"):
                 result["dest_port"] = text_dest
 
-        # 如果只有起运港没有目的港，默认PORT09
-        if result.get("orig_port") and not result.get("dest_port"):
-            result["dest_port"] = "PORT09"
-
         return result
 
     def _enhanced_regex_parse(self, text: str) -> Dict[str, Any]:
@@ -1759,10 +1755,6 @@ class LLMService:
         orig_port, dest_port = extract_ports_from_text(text)
         result["orig_port"] = orig_port
         result["dest_port"] = dest_port
-
-        # 如果只有起运港没有目的港，默认PORT09
-        if result["orig_port"] and not result["dest_port"]:
-            result["dest_port"] = "PORT09"
 
         # 提取天数（支持多种表达方式）
         days_patterns = [
